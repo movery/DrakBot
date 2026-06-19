@@ -14,6 +14,17 @@ def is_bullet_admin(interaction: discord.Interaction) -> bool:
     return discord.utils.get(interaction.user.roles, name=BULLET_ADMIN_ROLE) is not None
 
 
+async def deny_if_not_admin(interaction: discord.Interaction) -> bool:
+    """Send a denial message and return True if the user lacks the admin role."""
+    if is_bullet_admin(interaction):
+        return False
+    await interaction.response.send_message(
+        f"You need the **{BULLET_ADMIN_ROLE}** role to use this command.",
+        ephemeral=True
+    )
+    return True
+
+
 def _timeout_error(bot_member: discord.Member, target: discord.Member) -> str | None:
     if not bot_member.guild_permissions.moderate_members:
         return "Couldn't apply timeout — bot is missing Moderate Members permission"
@@ -29,11 +40,7 @@ class BulletsCog(commands.Cog):
     @app_commands.command(name="arm", description="Add bullets to a user")
     @app_commands.describe(user="The user to arm", amount="Number of bullets to add")
     async def arm(self, interaction: discord.Interaction, user: discord.Member, amount: int):
-        if not is_bullet_admin(interaction):
-            await interaction.response.send_message(
-                f"You need the **{BULLET_ADMIN_ROLE}** role to use this command.",
-                ephemeral=True
-            )
+        if await deny_if_not_admin(interaction):
             return
         if amount < 1:
             await interaction.response.send_message("Amount must be at least 1.", ephemeral=True)
@@ -46,11 +53,7 @@ class BulletsCog(commands.Cog):
     @app_commands.command(name="disarm", description="Remove all bullets from a user")
     @app_commands.describe(user="The user to disarm")
     async def disarm(self, interaction: discord.Interaction, user: discord.Member):
-        if not is_bullet_admin(interaction):
-            await interaction.response.send_message(
-                f"You need the **{BULLET_ADMIN_ROLE}** role to use this command.",
-                ephemeral=True
-            )
+        if await deny_if_not_admin(interaction):
             return
         db.set_bullets(interaction.guild_id, user.id, 0, user.name)
         await interaction.response.send_message(f"{user.mention} has been disarmed.")

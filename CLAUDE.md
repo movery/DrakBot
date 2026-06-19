@@ -77,6 +77,18 @@ Do not call `self.stop()` on recoverable errors — the user should still be abl
 | `DAILY_BULLET_AMOUNT` | Bullets granted per `/daily` claim (default: 5) |
 | `STREAM_GUARD_ENABLED` | `true` to auto-disconnect early streamers (default: false) |
 
+## Testing
+
+Tests live in `tests/` and use the stdlib `unittest` module (no extra dependencies). Run them with:
+```bash
+source .venv/bin/activate && python -m unittest discover -s tests
+```
+
+- `tests/test_db.py` — characterization tests for every `db.py` function, run against a throwaway SQLite file (`db.DB_PATH` is repointed in `setUp`).
+- `tests/test_deathroll.py` — pure message builders and the in-memory game/pending state tracking on `DeathrollCog`.
+
+When changing `db.py` or deathroll state logic, run the suite first to capture a green baseline, then again after the change. Discord interaction handlers are not unit-tested (they require heavy mocking) — verify those by running the bot.
+
 ## Cogs Overview
 
 | File | Key responsibility |

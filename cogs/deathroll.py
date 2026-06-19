@@ -21,20 +21,33 @@ class DeathrollGame:
     history: list = field(default_factory=list)
 
 
-def _build_message(game: DeathrollGame, footer: str) -> str:
-    header = (
+def _header(game: DeathrollGame) -> str:
+    return (
         f"**Deathroll** — {game.challenger.mention} vs {game.challengee.mention} "
         f"for **{game.stake}** bullet(s)"
     )
-    return "\n".join([header] + game.history + [footer])
+
+
+def _player(game: DeathrollGame, player_id: int) -> discord.Member:
+    """The player whose id matches player_id."""
+    return game.challenger if player_id == game.challenger.id else game.challengee
+
+
+def _opponent(game: DeathrollGame, player_id: int) -> discord.Member:
+    """The player who is NOT player_id."""
+    return game.challengee if player_id == game.challenger.id else game.challenger
+
+
+def _build_message(game: DeathrollGame, footer: str) -> str:
+    return "\n".join([_header(game)] + game.history + [footer])
+
+
+def _final_message(game: DeathrollGame) -> str:
+    return "\n".join([_header(game)] + game.history)
 
 
 def _turn_footer(game: DeathrollGame) -> str:
-    turn_mention = (
-        game.challenger.mention
-        if game.current_turn_id == game.challenger.id
-        else game.challengee.mention
-    )
+    turn_mention = _player(game, game.current_turn_id).mention
     return f"{turn_mention} rolls next (1–**{game.current_max}**)"
 
 
@@ -50,45 +63,40 @@ class RollView(discord.ui.View):
     def _update_button_label(self):
         self.roll_button.label = f"Roll (1–{self.game.current_max})"
 
-    def _reset_warn_task(self):
+    def _cancel_warn_task(self):
         if self._warn_task and not self._warn_task.done():
             self._warn_task.cancel()
+
+    def _reset_warn_task(self):
+        self._cancel_warn_task()
         self._warn_task = asyncio.create_task(self._send_warning())
 
     async def _send_warning(self):
         await asyncio.sleep(WARN_AT)
-        game = self.game
-        turn_mention = (
-            game.challenger.mention
-            if game.current_turn_id == game.challenger.id
-            else game.challengee.mention
-        )
+        turn_mention = _player(self.game, self.game.current_turn_id).mention
         if self.message:
             await self.message.channel.send(
                 f"⏰ {turn_mention}, you have {ROLL_TIMEOUT - WARN_AT} seconds left to roll or you forfeit!",
                 delete_after=ROLL_TIMEOUT - WARN_AT,
             )
 
-    async def on_timeout(self):
-        if self._warn_task and not self._warn_task.done():
-            self._warn_task.cancel()
-        game = self.game
-        if not self.message:
-            return
-        loser = game.challenger if game.current_turn_id == game.challenger.id else game.challengee
-        winner = game.challengee if loser.id == game.challenger.id else game.challenger
-        db.add_bullets(game.guild_id, winner.id, game.stake * 2, winner.name)
-        self.cog._end_game(game)
+    def _finish(self, winner: discord.Member, line: str):
+        """Pay out the winner, end the game, and stop the view."""
+        self._cancel_warn_task()
+        db.add_bullets(self.game.guild_id, winner.id, self.game.stake * 2, winner.name)
+        self.cog._end_game(self.game)
+        self.game.history.append(line)
         self.roll_button.disabled = True
-        game.history.append(f"{loser.mention} ran out of time — {winner.mention} wins **{game.stake}** bullet(s)!")
-        header = (
-            f"**Deathroll** — {game.challenger.mention} vs {game.challengee.mention} "
-            f"for **{game.stake}** bullet(s)"
-        )
-        await self.message.edit(
-            content="\n".join([header] + game.history),
-            view=self,
-        )
+        self.stop()
+
+    async def on_timeout(self):
+        if not self.message:
+            self._cancel_warn_task()
+            return
+        loser = _player(self.game, self.game.current_turn_id)
+        winner = _opponent(self.game, self.game.current_turn_id)
+        self._finish(winner, f"{loser.mention} ran out of time — {winner.mention} wins **{self.game.stake}** bullet(s)!")
+        await self.message.edit(content=_final_message(self.game), view=self)
 
     @discord.ui.button(style=discord.ButtonStyle.primary)
     async def roll_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -101,29 +109,14 @@ class RollView(discord.ui.View):
         roller = interaction.user
 
         if roll == 1:
-            if self._warn_task and not self._warn_task.done():
-                self._warn_task.cancel()
-            winner = game.challengee if roller.id == game.challenger.id else game.challenger
-            db.add_bullets(game.guild_id, winner.id, game.stake * 2, winner.name)
-            self.cog._end_game(game)
-            self.stop()
-            button.disabled = True
-            game.history.append(f"{roller.mention} rolled **1** — LOSER! {winner.mention} wins **{game.stake}** bullet(s)!")
-            header = (
-                f"**Deathroll** — {game.challenger.mention} vs {game.challengee.mention} "
-                f"for **{game.stake}** bullet(s)"
-            )
-            await interaction.response.edit_message(
-                content="\n".join([header] + game.history),
-                view=self,
-            )
+            winner = _opponent(game, roller.id)
+            self._finish(winner, f"{roller.mention} rolled **1** — LOSER! {winner.mention} wins **{game.stake}** bullet(s)!")
+            await interaction.response.edit_message(content=_final_message(game), view=self)
             return
 
         game.history.append(f"{roller.mention} rolled **{roll}**")
         game.current_max = roll
-        game.current_turn_id = (
-            game.challengee.id if roller.id == game.challenger.id else game.challenger.id
-        )
+        game.current_turn_id = _opponent(game, roller.id).id
         self._update_button_label()
         self._reset_warn_task()
         await interaction.response.edit_message(
