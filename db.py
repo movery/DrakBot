@@ -1,4 +1,8 @@
 import sqlite3
+import datetime
+import zoneinfo
+
+_EST = zoneinfo.ZoneInfo("America/New_York")
 
 DB_PATH = "bullets.db"
 
@@ -17,9 +21,13 @@ def init_db():
             user_id    INTEGER NOT NULL,
             amount     INTEGER NOT NULL DEFAULT 0,
             nickname   TEXT,
+            last_daily TEXT,
             PRIMARY KEY (guild_id, user_id)
         )
     """)
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(bullets)").fetchall()]
+    if "last_daily" not in columns:
+        conn.execute("ALTER TABLE bullets ADD COLUMN last_daily TEXT")
     conn.commit()
     conn.close()
 
@@ -98,3 +106,34 @@ def spend_bullet(guild_id: int, user_id: int, nickname: str = None) -> bool:
     conn.commit()
     conn.close()
     return True
+
+
+def claim_daily(guild_id: int, user_id: int, amount: int, nickname: str = None) -> tuple[bool, datetime.timedelta | None, int]:
+    """Returns (claimed, time_remaining, new_total). time_remaining is None when claimed successfully."""
+    now_est = datetime.datetime.now(_EST)
+    today = now_est.date().isoformat()
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT amount, last_daily FROM bullets WHERE guild_id=? AND user_id=?",
+        (guild_id, user_id)
+    ).fetchone()
+
+    if row and row["last_daily"] == today:
+        midnight = now_est.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
+        conn.close()
+        return (False, midnight - now_est, row["amount"])
+
+    conn.execute("""
+        INSERT INTO bullets (guild_id, user_id, amount, nickname, last_daily) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET
+            amount = amount + excluded.amount,
+            nickname = COALESCE(excluded.nickname, nickname),
+            last_daily = excluded.last_daily
+    """, (guild_id, user_id, amount, nickname, today))
+    conn.commit()
+    new_total = conn.execute(
+        "SELECT amount FROM bullets WHERE guild_id=? AND user_id=?",
+        (guild_id, user_id)
+    ).fetchone()["amount"]
+    conn.close()
+    return (True, None, new_total)

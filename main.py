@@ -16,6 +16,7 @@ async def setup_hook():
     db.init_db()
     await bot.load_extension("cogs.bullets")
     await bot.load_extension("cogs.flee")
+    await bot.load_extension("cogs.daily")
 
 bot.setup_hook = setup_hook
 
