@@ -67,6 +67,30 @@ def set_bullets(guild_id: int, user_id: int, amount: int, nickname: str = None):
     conn.close()
 
 
+def transfer_bullets(guild_id: int, from_id: int, to_id: int, amount: int, from_name: str = None, to_name: str = None) -> bool:
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT amount FROM bullets WHERE guild_id=? AND user_id=?",
+        (guild_id, from_id)
+    ).fetchone()
+    if not row or row["amount"] < amount:
+        conn.close()
+        return False
+    conn.execute(
+        "UPDATE bullets SET amount = amount - ?, nickname = COALESCE(?, nickname) WHERE guild_id=? AND user_id=?",
+        (amount, from_name, guild_id, from_id)
+    )
+    conn.execute("""
+        INSERT INTO bullets (guild_id, user_id, amount, nickname) VALUES (?, ?, ?, ?)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET
+            amount = amount + excluded.amount,
+            nickname = COALESCE(excluded.nickname, nickname)
+    """, (guild_id, to_id, amount, to_name))
+    conn.commit()
+    conn.close()
+    return True
+
+
 def spend_bullet(guild_id: int, user_id: int, nickname: str = None) -> bool:
     if get_bullets(guild_id, user_id) < 1:
         return False

@@ -102,6 +102,28 @@ class BulletsCog(commands.Cog):
 
         await interaction.response.send_message(msg)
 
+    @app_commands.command(name="trade", description="Transfer bullets to another user")
+    @app_commands.describe(user="The user to send bullets to", amount="Number of bullets to send")
+    async def trade(self, interaction: discord.Interaction, user: discord.Member, amount: int):
+        if amount < 1:
+            await interaction.response.send_message("Amount must be at least 1.", ephemeral=True)
+            return
+        if user == interaction.user:
+            await interaction.response.send_message("You can't trade with yourself.", ephemeral=True)
+            return
+        success = db.transfer_bullets(
+            interaction.guild_id,
+            interaction.user.id, user.id,
+            amount,
+            interaction.user.name, user.name
+        )
+        if not success:
+            await interaction.response.send_message("You don't have enough bullets.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"{interaction.user.mention} traded **{amount}** bullet(s) to {user.mention}."
+        )
+
     @app_commands.command(name="ammo", description="Check how many bullets a user has")
     @app_commands.describe(user="The user to check (defaults to yourself)")
     async def ammo(self, interaction: discord.Interaction, user: discord.Member = None):
