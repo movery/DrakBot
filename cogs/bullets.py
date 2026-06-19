@@ -1,4 +1,6 @@
 import os
+import random
+import datetime
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -10,6 +12,16 @@ BULLET_ADMIN_ROLE = os.getenv("BULLET_ADMIN_ROLE", "")
 
 def is_bullet_admin(interaction: discord.Interaction) -> bool:
     return discord.utils.get(interaction.user.roles, name=BULLET_ADMIN_ROLE) is not None
+
+
+def _timeout_error(bot_member: discord.Member, target: discord.Member) -> str | None:
+    if not bot_member.guild_permissions.moderate_members:
+        return "Couldn't apply timeout — bot is missing Moderate Members permission"
+    if target.id == bot_member.guild.owner_id:
+        return f"Couldn't timeout {target.mention} — they own the server"
+    if bot_member.top_role <= target.top_role:
+        return f"Couldn't timeout {target.mention} — their role is too high"
+    return None
 
 
 class BulletsCog(commands.Cog):
@@ -57,18 +69,38 @@ class BulletsCog(commands.Cog):
                 ephemeral=True
             )
             return
-        try:
+
+        roll = random.randint(1, 20)
+        timeout_duration = datetime.timedelta(seconds=10)
+
+        if roll == 1:
+            msg = f"CRITICAL FAIL! {interaction.user.mention} shot themselves and is timed out for 10 seconds! (Roll: **{roll}**)"
+            timeout_error = _timeout_error(interaction.guild.me, interaction.user)
+            if timeout_error:
+                msg += f"\n({timeout_error})"
+            else:
+                await interaction.user.timeout(timeout_duration)
+        elif roll == 20:
+            msg = f"CRITICAL HIT! {interaction.user.mention} obliterates {user.mention}, timing them out for 10 seconds! (Roll: **{roll}**)"
             await user.move_to(None)
-        except discord.Forbidden:
-            db.add_bullets(interaction.guild_id, interaction.user.id, 1)
-            await interaction.response.send_message(
-                "I don't have permission to move members. Bullet refunded.",
-                ephemeral=True
-            )
-            return
-        await interaction.response.send_message(
-            f"{interaction.user.mention} shot {user.mention}!"
-        )
+            timeout_error = _timeout_error(interaction.guild.me, user)
+            if timeout_error:
+                msg += f"\n({timeout_error})"
+            else:
+                await user.timeout(timeout_duration)
+        else:
+            msg = f"{interaction.user.mention} shot {user.mention}! (Roll: **{roll}**)"
+            try:
+                await user.move_to(None)
+            except discord.Forbidden:
+                db.add_bullets(interaction.guild_id, interaction.user.id, 1)
+                await interaction.response.send_message(
+                    "I don't have permission to move members. Bullet refunded.",
+                    ephemeral=True
+                )
+                return
+
+        await interaction.response.send_message(msg)
 
     @app_commands.command(name="ammo", description="Check how many bullets a user has")
     @app_commands.describe(user="The user to check (defaults to yourself)")
