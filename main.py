@@ -15,6 +15,7 @@ bot = commands.Bot(command_prefix="/", intents=intents)
 async def setup_hook():
     db.init_db()
     await bot.load_extension("cogs.bullets")
+    await bot.load_extension("cogs.flee")
 
 bot.setup_hook = setup_hook
 
