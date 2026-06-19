@@ -20,10 +20,6 @@ def init_db():
             PRIMARY KEY (guild_id, user_id)
         )
     """)
-    try:
-        conn.execute("ALTER TABLE bullets ADD COLUMN nickname TEXT")
-    except sqlite3.OperationalError:
-        pass
     conn.commit()
     conn.close()
 
