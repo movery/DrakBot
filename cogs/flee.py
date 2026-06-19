@@ -3,45 +3,20 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-FLEE_USER_ID = int(os.getenv("FLEE_USER_ID", "0"))
 BULLET_ADMIN_ROLE = os.getenv("BULLET_ADMIN_ROLE", "")
 
-flee_enabled = False
+flee_user_id = None
 
 
 class FleeCog(commands.Cog):
 
-    @app_commands.command(name="flee", description="Enable or disable flee mode")
-    @app_commands.describe(enabled="Whether flee mode should be active")
-    async def flee(self, interaction: discord.Interaction, enabled: bool):
-        if not discord.utils.get(interaction.user.roles, name=BULLET_ADMIN_ROLE):
-            await interaction.response.send_message(
-                f"You need the **{BULLET_ADMIN_ROLE}** role to use this command.",
-                ephemeral=True
-            )
-            return
-
-        global flee_enabled
-        flee_enabled = enabled
-        state = "enabled" if enabled else "disabled"
-        await interaction.response.send_message(f"Flee mode {state}.")
-
-    @commands.Cog.listener()
-    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        if not flee_enabled or FLEE_USER_ID == 0:
-            return
-        if member.id != FLEE_USER_ID:
-            return
-        if after.channel is None or before.channel == after.channel:
-            return
-
-        channel = after.channel
-        others = [m for m in channel.members if m.id != FLEE_USER_ID]
+    async def _do_flee(self, channel: discord.VoiceChannel):
+        others = [m for m in channel.members if m.id != flee_user_id]
         if not others:
             return
 
         voice_channels = sorted(
-            [c for c in member.guild.channels
+            [c for c in channel.guild.channels
              if isinstance(c, discord.VoiceChannel) and c.category_id == channel.category_id],
             key=lambda c: c.position
         )
@@ -61,6 +36,37 @@ class FleeCog(commands.Cog):
                 await m.move_to(destination)
             except discord.Forbidden:
                 pass
+
+    @app_commands.command(name="flee", description="Set a user to flee from, or omit to disable")
+    @app_commands.describe(user="The user others will flee from (omit to disable flee mode)")
+    async def flee(self, interaction: discord.Interaction, user: discord.Member = None):
+        if not discord.utils.get(interaction.user.roles, name=BULLET_ADMIN_ROLE):
+            await interaction.response.send_message(
+                f"You need the **{BULLET_ADMIN_ROLE}** role to use this command.",
+                ephemeral=True
+            )
+            return
+
+        global flee_user_id
+        flee_user_id = user.id if user else None
+
+        if user:
+            await interaction.response.send_message(f"Flee mode enabled — others will flee from {user.mention}.")
+            if user.voice and user.voice.channel:
+                await self._do_flee(user.voice.channel)
+        else:
+            await interaction.response.send_message("Flee mode disabled.")
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        if flee_user_id is None:
+            return
+        if member.id != flee_user_id:
+            return
+        if after.channel is None or before.channel == after.channel:
+            return
+
+        await self._do_flee(after.channel)
 
 
 async def setup(bot: commands.Bot):
