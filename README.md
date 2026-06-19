@@ -102,6 +102,23 @@ When enabled, any user who starts streaming video (camera or Go Live) within 5 s
 
 ---
 
+## Running the Tests
+
+The project includes a test suite built on Python's standard-library `unittest` module — no extra dependencies required. From the project root with the virtual environment active:
+
+```bash
+python -m unittest discover -s tests
+```
+
+The suite lives in `tests/` and covers:
+
+- **`tests/test_db.py`** — every function in the bullet-economy database layer, run against a throwaway SQLite file (the schema migration, atomic deductions, transfers, and the daily-claim cooldown/reset cycle).
+- **`tests/test_deathroll.py`** — the deathroll message builders and the in-memory game/pending-challenge state tracking.
+
+Discord interaction handlers are not unit-tested (they require a live gateway connection); verify those by running the bot. Run the suite before and after any change to `db.py` or the deathroll game logic to confirm behavior is preserved.
+
+---
+
 ## Creating a Discord Bot
 
 ### 1. Create an Application
