@@ -65,7 +65,7 @@ When enabled, any user who starts streaming video (camera or Go Live) within 5 s
 2. **Create and activate a virtual environment**
    ```bash
    python3 -m venv .venv
-   source .venv/bin/activate  # Windows: .venv\Scripts\activate
+   source .venv/bin/activate
    ```
 
 3. **Install dependencies**
