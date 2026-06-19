@@ -2,23 +2,33 @@ import os
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+import db
 
 load_dotenv()
 
 intents = discord.Intents.default()
-intents.message_content = True
+intents.voice_states = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="/", intents=intents)
+
+
+async def setup_hook():
+    db.init_db()
+    await bot.load_extension("cogs.bullets")
+
+bot.setup_hook = setup_hook
 
 
 @bot.event
 async def on_ready():
+    await bot.tree.sync()
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    print("Synced slash commands.")
 
 
-@bot.command()
-async def ping(ctx):
-    await ctx.send(f"Pong! {round(bot.latency * 1000)}ms")
+@bot.tree.command(name="ping", description="Check the bot's latency")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message(f"Pong! {round(bot.latency * 1000)}ms")
 
 
 if __name__ == "__main__":

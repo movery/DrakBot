@@ -1,6 +1,9 @@
 # Environment
 .env
 
+# Runtime database
+bullets.db
+
 # Python
 __pycache__/
 *.py[cod]
