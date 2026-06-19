@@ -95,6 +95,19 @@ def transfer_bullets(guild_id: int, from_id: int, to_id: int, amount: int, from_
     return True
 
 
+def deduct_bullets(guild_id: int, user_id: int, amount: int, nickname: str = None) -> bool:
+    conn = get_connection()
+    cursor = conn.execute(
+        "UPDATE bullets SET amount = amount - ?, nickname = COALESCE(?, nickname) "
+        "WHERE guild_id=? AND user_id=? AND amount >= ?",
+        (amount, nickname, guild_id, user_id, amount)
+    )
+    conn.commit()
+    changed = cursor.rowcount > 0
+    conn.close()
+    return changed
+
+
 def spend_bullet(guild_id: int, user_id: int, nickname: str = None) -> bool:
     if get_bullets(guild_id, user_id) < 1:
         return False
