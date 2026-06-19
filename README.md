@@ -104,9 +104,10 @@ When enabled, any user who starts streaming video (camera or Go Live) within 5 s
 
 ## Running the Tests
 
-The project includes a test suite built on Python's standard-library `unittest` module — no extra dependencies required. From the project root with the virtual environment active:
+The project includes a test suite built on Python's standard-library `unittest` module — no extra dependencies required. From the project root, with the virtual environment activated:
 
 ```bash
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 python -m unittest discover -s tests
 ```
 
