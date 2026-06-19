@@ -16,9 +16,14 @@ def init_db():
             guild_id   INTEGER NOT NULL,
             user_id    INTEGER NOT NULL,
             amount     INTEGER NOT NULL DEFAULT 0,
+            nickname   TEXT,
             PRIMARY KEY (guild_id, user_id)
         )
     """)
+    try:
+        conn.execute("ALTER TABLE bullets ADD COLUMN nickname TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 
@@ -33,12 +38,14 @@ def get_bullets(guild_id: int, user_id: int) -> int:
     return row["amount"] if row else 0
 
 
-def add_bullets(guild_id: int, user_id: int, amount: int) -> int:
+def add_bullets(guild_id: int, user_id: int, amount: int, nickname: str = None) -> int:
     conn = get_connection()
     conn.execute("""
-        INSERT INTO bullets (guild_id, user_id, amount) VALUES (?, ?, ?)
-        ON CONFLICT(guild_id, user_id) DO UPDATE SET amount = amount + excluded.amount
-    """, (guild_id, user_id, amount))
+        INSERT INTO bullets (guild_id, user_id, amount, nickname) VALUES (?, ?, ?, ?)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET
+            amount = amount + excluded.amount,
+            nickname = COALESCE(excluded.nickname, nickname)
+    """, (guild_id, user_id, amount, nickname))
     conn.commit()
     new_total = conn.execute(
         "SELECT amount FROM bullets WHERE guild_id=? AND user_id=?",
@@ -48,23 +55,25 @@ def add_bullets(guild_id: int, user_id: int, amount: int) -> int:
     return new_total
 
 
-def set_bullets(guild_id: int, user_id: int, amount: int):
+def set_bullets(guild_id: int, user_id: int, amount: int, nickname: str = None):
     conn = get_connection()
     conn.execute("""
-        INSERT INTO bullets (guild_id, user_id, amount) VALUES (?, ?, ?)
-        ON CONFLICT(guild_id, user_id) DO UPDATE SET amount = excluded.amount
-    """, (guild_id, user_id, amount))
+        INSERT INTO bullets (guild_id, user_id, amount, nickname) VALUES (?, ?, ?, ?)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET
+            amount = excluded.amount,
+            nickname = COALESCE(excluded.nickname, nickname)
+    """, (guild_id, user_id, amount, nickname))
     conn.commit()
     conn.close()
 
 
-def spend_bullet(guild_id: int, user_id: int) -> bool:
+def spend_bullet(guild_id: int, user_id: int, nickname: str = None) -> bool:
     if get_bullets(guild_id, user_id) < 1:
         return False
     conn = get_connection()
     conn.execute(
-        "UPDATE bullets SET amount = amount - 1 WHERE guild_id=? AND user_id=?",
-        (guild_id, user_id)
+        "UPDATE bullets SET amount = amount - 1, nickname = COALESCE(?, nickname) WHERE guild_id=? AND user_id=?",
+        (nickname, guild_id, user_id)
     )
     conn.commit()
     conn.close()

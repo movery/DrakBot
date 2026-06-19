@@ -38,7 +38,7 @@ class BulletsCog(commands.Cog):
         if amount < 1:
             await interaction.response.send_message("Amount must be at least 1.", ephemeral=True)
             return
-        new_total = db.add_bullets(interaction.guild_id, user.id, amount)
+        new_total = db.add_bullets(interaction.guild_id, user.id, amount, user.name)
         await interaction.response.send_message(
             f"Armed {user.mention} with {amount} bullet(s). They now have **{new_total}**."
         )
@@ -52,18 +52,18 @@ class BulletsCog(commands.Cog):
                 ephemeral=True
             )
             return
-        db.set_bullets(interaction.guild_id, user.id, 0)
+        db.set_bullets(interaction.guild_id, user.id, 0, user.name)
         await interaction.response.send_message(f"{user.mention} has been disarmed.")
 
     @app_commands.command(name="shoot", description="Spend 1 bullet to disconnect a user from voice")
     @app_commands.describe(user="The user to shoot")
     async def shoot(self, interaction: discord.Interaction, user: discord.Member):
-        spent = db.spend_bullet(interaction.guild_id, interaction.user.id)
+        spent = db.spend_bullet(interaction.guild_id, interaction.user.id, interaction.user.name)
         if not spent:
             await interaction.response.send_message("You have no bullets.", ephemeral=True)
             return
         if user.voice is None:
-            db.add_bullets(interaction.guild_id, interaction.user.id, 1)
+            db.add_bullets(interaction.guild_id, interaction.user.id, 1, interaction.user.name)
             await interaction.response.send_message(
                 f"{user.mention} is not in a voice channel. Bullet refunded.",
                 ephemeral=True
@@ -93,7 +93,7 @@ class BulletsCog(commands.Cog):
             try:
                 await user.move_to(None)
             except discord.Forbidden:
-                db.add_bullets(interaction.guild_id, interaction.user.id, 1)
+                db.add_bullets(interaction.guild_id, interaction.user.id, 1, interaction.user.name)
                 await interaction.response.send_message(
                     "I don't have permission to move members. Bullet refunded.",
                     ephemeral=True
