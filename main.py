@@ -18,6 +18,7 @@ async def setup_hook():
     await bot.load_extension("cogs.flee")
     await bot.load_extension("cogs.daily")
     await bot.load_extension("cogs.deathroll")
+    await bot.load_extension("cogs.stream_guard")
 
 bot.setup_hook = setup_hook
 
