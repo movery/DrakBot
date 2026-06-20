@@ -9,6 +9,9 @@ import db
 
 BULLET_ADMIN_ROLE = os.getenv("BULLET_ADMIN_ROLE", "")
 
+# Cap on a single arm/trade so a fat-fingered or overflowing int can't wreck balances.
+MAX_AMOUNT = 1_000_000
+
 
 def is_bullet_admin(interaction: discord.Interaction) -> bool:
     return discord.utils.get(interaction.user.roles, name=BULLET_ADMIN_ROLE) is not None
@@ -45,6 +48,9 @@ class BulletsCog(commands.Cog):
         if amount < 1:
             await interaction.response.send_message("Amount must be at least 1.", ephemeral=True)
             return
+        if amount > MAX_AMOUNT:
+            await interaction.response.send_message(f"Amount can't exceed {MAX_AMOUNT}.", ephemeral=True)
+            return
         new_total = db.add_bullets(interaction.guild_id, user.id, amount, user.name)
         await interaction.response.send_message(
             f"Armed {user.mention} with {amount} bullet(s). They now have **{new_total}**."
@@ -61,6 +67,12 @@ class BulletsCog(commands.Cog):
     @app_commands.command(name="shoot", description="Spend 1 bullet to disconnect a user from voice")
     @app_commands.describe(user="The user to shoot")
     async def shoot(self, interaction: discord.Interaction, user: discord.Member):
+        if user == interaction.user:
+            await interaction.response.send_message("You can't shoot yourself.", ephemeral=True)
+            return
+        if user.bot:
+            await interaction.response.send_message("You can't shoot a bot.", ephemeral=True)
+            return
         spent = db.spend_bullet(interaction.guild_id, interaction.user.id, interaction.user.name)
         if not spent:
             await interaction.response.send_message("You have no bullets.", ephemeral=True)
@@ -85,7 +97,15 @@ class BulletsCog(commands.Cog):
                 await interaction.user.timeout(timeout_duration)
         elif roll == 20:
             msg = f"CRITICAL HIT! {interaction.user.mention} obliterates {user.mention}, timing them out for 10 seconds! (Roll: **{roll}**)"
-            await user.move_to(None)
+            try:
+                await user.move_to(None)
+            except discord.HTTPException:
+                db.add_bullets(interaction.guild_id, interaction.user.id, 1, interaction.user.name)
+                await interaction.response.send_message(
+                    "Couldn't move that user (missing permission or they left voice). Bullet refunded.",
+                    ephemeral=True
+                )
+                return
             timeout_error = _timeout_error(interaction.guild.me, user)
             if timeout_error:
                 msg += f"\n({timeout_error})"
@@ -95,10 +115,10 @@ class BulletsCog(commands.Cog):
             msg = f"{interaction.user.mention} shot {user.mention}! (Roll: **{roll}**)"
             try:
                 await user.move_to(None)
-            except discord.Forbidden:
+            except discord.HTTPException:
                 db.add_bullets(interaction.guild_id, interaction.user.id, 1, interaction.user.name)
                 await interaction.response.send_message(
-                    "I don't have permission to move members. Bullet refunded.",
+                    "Couldn't move that user (missing permission or they left voice). Bullet refunded.",
                     ephemeral=True
                 )
                 return
@@ -111,8 +131,14 @@ class BulletsCog(commands.Cog):
         if amount < 1:
             await interaction.response.send_message("Amount must be at least 1.", ephemeral=True)
             return
+        if amount > MAX_AMOUNT:
+            await interaction.response.send_message(f"Amount can't exceed {MAX_AMOUNT}.", ephemeral=True)
+            return
         if user == interaction.user:
             await interaction.response.send_message("You can't trade with yourself.", ephemeral=True)
+            return
+        if user.bot:
+            await interaction.response.send_message("You can't trade with a bot.", ephemeral=True)
             return
         success = db.transfer_bullets(
             interaction.guild_id,
