@@ -172,5 +172,62 @@ class ClaimDailyTests(DbTestCase):
         self.assertEqual(total, 12)
 
 
+class DeathrollGameTests(DbTestCase):
+    def _status(self, game_id):
+        conn = db.get_connection()
+        row = conn.execute(
+            "SELECT status, winner_id, outcome FROM deathroll_games WHERE id=?",
+            (game_id,),
+        ).fetchone()
+        conn.close()
+        return row
+
+    def test_create_returns_id_and_marks_active(self):
+        gid = db.create_deathroll_game(GUILD, ALICE, BOB, 10, "alice", "bob")
+        self.assertIsInstance(gid, int)
+        row = self._status(gid)
+        self.assertEqual(row["status"], "active")
+        self.assertIsNone(row["winner_id"])
+
+    def test_finish_records_winner_and_outcome(self):
+        gid = db.create_deathroll_game(GUILD, ALICE, BOB, 10)
+        db.finish_deathroll_game(gid, BOB, "rolled_one")
+        row = self._status(gid)
+        self.assertEqual(row["status"], "finished")
+        self.assertEqual(row["winner_id"], BOB)
+        self.assertEqual(row["outcome"], "rolled_one")
+
+    def test_finish_ignores_already_settled_game(self):
+        gid = db.create_deathroll_game(GUILD, ALICE, BOB, 10)
+        db.finish_deathroll_game(gid, BOB, "rolled_one")
+        db.finish_deathroll_game(gid, ALICE, "timeout")  # must not overwrite
+        row = self._status(gid)
+        self.assertEqual(row["winner_id"], BOB)
+        self.assertEqual(row["outcome"], "rolled_one")
+
+    def test_recover_refunds_both_players_and_marks_refunded(self):
+        gid = db.create_deathroll_game(GUILD, ALICE, BOB, 10, "alice", "bob")
+        refunded = db.recover_deathroll_games()
+        self.assertEqual(len(refunded), 1)
+        self.assertEqual(db.get_bullets(GUILD, ALICE), 10)
+        self.assertEqual(db.get_bullets(GUILD, BOB), 10)
+        self.assertEqual(self._status(gid)["status"], "refunded")
+
+    def test_recover_skips_finished_games(self):
+        gid = db.create_deathroll_game(GUILD, ALICE, BOB, 10)
+        db.finish_deathroll_game(gid, BOB, "rolled_one")
+        refunded = db.recover_deathroll_games()
+        self.assertEqual(refunded, [])
+        self.assertEqual(db.get_bullets(GUILD, ALICE), 0)
+        self.assertEqual(db.get_bullets(GUILD, BOB), 0)
+
+    def test_recover_is_idempotent(self):
+        db.create_deathroll_game(GUILD, ALICE, BOB, 10)
+        db.recover_deathroll_games()
+        second = db.recover_deathroll_games()  # nothing left active
+        self.assertEqual(second, [])
+        self.assertEqual(db.get_bullets(GUILD, ALICE), 10)  # not double-refunded
+
+
 if __name__ == "__main__":
     unittest.main()

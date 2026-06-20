@@ -21,7 +21,7 @@ def player(uid, name):
     return SimpleNamespace(id=uid, name=name, mention=f"<@{uid}>")
 
 
-def make_game(challenger, challengee, stake=10):
+def make_game(challenger, challengee, stake=10, game_id=1):
     return DeathrollGame(
         guild_id=GUILD,
         challenger=challenger,
@@ -29,6 +29,7 @@ def make_game(challenger, challengee, stake=10):
         stake=stake,
         current_max=stake,
         current_turn_id=challenger.id,
+        id=game_id,
     )
 
 
@@ -72,12 +73,13 @@ class CogStateTests(unittest.TestCase):
         self.assertNotIn((GUILD, self.bob.id), self.cog._players)
         self.assertEqual(self.cog._games, {})
 
-    def test_register_assigns_unique_ids(self):
-        g1 = make_game(self.alice, self.bob)
-        g2 = make_game(player(300, "carol"), player(400, "dave"))
-        id1 = self.cog._register_game(g1)
-        id2 = self.cog._register_game(g2)
-        self.assertNotEqual(id1, id2)
+    def test_register_uses_game_row_id(self):
+        g1 = make_game(self.alice, self.bob, game_id=7)
+        g2 = make_game(player(300, "carol"), player(400, "dave"), game_id=8)
+        self.assertEqual(self.cog._register_game(g1), 7)
+        self.assertEqual(self.cog._register_game(g2), 8)
+        self.assertIn(7, self.cog._games)
+        self.assertIn(8, self.cog._games)
 
     def test_clear_pending_removes_entries(self):
         self.cog._pending.add((GUILD, self.alice.id))

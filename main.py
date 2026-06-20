@@ -14,6 +14,9 @@ bot = commands.Bot(command_prefix="/", intents=intents)
 
 async def setup_hook():
     db.init_db()
+    refunded = db.recover_deathroll_games()
+    if refunded:
+        print(f"Refunded {len(refunded)} interrupted deathroll game(s).")
     await bot.load_extension("cogs.bullets")
     await bot.load_extension("cogs.flee")
     await bot.load_extension("cogs.daily")

@@ -41,6 +41,23 @@ def init_db():
         if "last_daily" not in columns:
             conn.execute("ALTER TABLE bullets ADD COLUMN last_daily TEXT")
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS deathroll_games (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id        INTEGER NOT NULL,
+                challenger_id   INTEGER NOT NULL,
+                challenger_name TEXT,
+                challengee_id   INTEGER NOT NULL,
+                challengee_name TEXT,
+                stake           INTEGER NOT NULL,
+                status          TEXT NOT NULL,
+                winner_id       INTEGER,
+                outcome         TEXT,
+                created_at      TEXT NOT NULL,
+                finished_at     TEXT
+            )
+        """)
+
 
 def get_bullets(guild_id: int, user_id: int) -> int:
     with _connect() as conn:
@@ -136,3 +153,71 @@ def claim_daily(guild_id: int, user_id: int, amount: int, nickname: str | None =
             (guild_id, user_id)
         ).fetchone()["amount"]
     return (True, None, new_total)
+
+
+def create_deathroll_game(
+    guild_id: int,
+    challenger_id: int,
+    challengee_id: int,
+    stake: int,
+    challenger_name: str | None = None,
+    challengee_name: str | None = None,
+) -> int:
+    """Record a newly accepted game (status 'active') and return its row id.
+
+    Both players' stakes are deducted by the caller; this row is the persistent
+    record of that escrow so it can be refunded if the bot stops mid-game.
+    """
+    now = datetime.datetime.now(_EST).isoformat()
+    with _connect() as conn:
+        cursor = conn.execute("""
+            INSERT INTO deathroll_games
+                (guild_id, challenger_id, challenger_name, challengee_id,
+                 challengee_name, stake, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
+        """, (guild_id, challenger_id, challenger_name, challengee_id,
+              challengee_name, stake, now))
+        return cursor.lastrowid
+
+
+def finish_deathroll_game(game_id: int, winner_id: int, outcome: str):
+    """Settle a game: mark it finished and record the winner and outcome."""
+    now = datetime.datetime.now(_EST).isoformat()
+    with _connect() as conn:
+        conn.execute("""
+            UPDATE deathroll_games
+            SET status='finished', winner_id=?, outcome=?, finished_at=?
+            WHERE id=? AND status='active'
+        """, (winner_id, outcome, now, game_id))
+
+
+def recover_deathroll_games() -> list:
+    """Refund both stakes for any game left 'active' by a crash/restart.
+
+    The in-memory game and its UI are gone after a restart, so interrupted
+    games cannot resume — instead each player gets their stake back and the
+    row is marked 'refunded'. Returns the refunded rows (for logging).
+    """
+    now = datetime.datetime.now(_EST).isoformat()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM deathroll_games WHERE status='active'"
+        ).fetchall()
+        for row in rows:
+            for uid, name in (
+                (row["challenger_id"], row["challenger_name"]),
+                (row["challengee_id"], row["challengee_name"]),
+            ):
+                conn.execute("""
+                    INSERT INTO bullets (guild_id, user_id, amount, nickname)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                        amount = amount + excluded.amount,
+                        nickname = COALESCE(excluded.nickname, nickname)
+                """, (row["guild_id"], uid, row["stake"], name))
+            conn.execute("""
+                UPDATE deathroll_games
+                SET status='refunded', outcome='refunded', finished_at=?
+                WHERE id=?
+            """, (now, row["id"]))
+        return rows

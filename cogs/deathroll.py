@@ -19,6 +19,7 @@ class DeathrollGame:
     current_max: int
     current_turn_id: int
     history: list = field(default_factory=list)
+    id: int = 0  # deathroll_games row id; 0 until persisted on accept
 
 
 def _header(game: DeathrollGame) -> str:
@@ -58,6 +59,7 @@ class RollView(discord.ui.View):
         self.cog = cog
         self.message: discord.Message | None = None
         self._warn_task: asyncio.Task | None = None
+        self._settled = False  # guards against a roll/timeout double-payout race
         self._update_button_label()
 
     def _update_button_label(self):
@@ -75,32 +77,40 @@ class RollView(discord.ui.View):
         await asyncio.sleep(WARN_AT)
         turn_mention = _player(self.game, self.game.current_turn_id).mention
         if self.message:
-            await self.message.channel.send(
-                f"⏰ {turn_mention}, you have {ROLL_TIMEOUT - WARN_AT} seconds left to roll or you forfeit!",
-                delete_after=ROLL_TIMEOUT - WARN_AT,
-            )
+            try:
+                await self.message.channel.send(
+                    f"⏰ {turn_mention}, you have {ROLL_TIMEOUT - WARN_AT} seconds left to roll or you forfeit!",
+                    delete_after=ROLL_TIMEOUT - WARN_AT,
+                )
+            except discord.HTTPException:
+                pass  # channel/message gone — the game still resolves on timeout
 
-    def _finish(self, winner: discord.Member, line: str):
-        """Pay out the winner, end the game, and stop the view."""
+    def _finish(self, winner: discord.Member, line: str, outcome: str):
+        """Pay out the winner, settle the persisted game, and stop the view."""
+        self._settled = True
         self._cancel_warn_task()
         db.add_bullets(self.game.guild_id, winner.id, self.game.stake * 2, winner.name)
+        db.finish_deathroll_game(self.game.id, winner.id, outcome)
         self.cog._end_game(self.game)
         self.game.history.append(line)
         self.roll_button.disabled = True
         self.stop()
 
     async def on_timeout(self):
-        if not self.message:
+        if self._settled or not self.message:
             self._cancel_warn_task()
             return
         loser = _player(self.game, self.game.current_turn_id)
         winner = _opponent(self.game, self.game.current_turn_id)
-        self._finish(winner, f"{loser.mention} ran out of time — {winner.mention} wins **{self.game.stake}** bullet(s)!")
+        self._finish(winner, f"{loser.mention} ran out of time — {winner.mention} wins **{self.game.stake}** bullet(s)!", "timeout")
         await self.message.edit(content=_final_message(self.game), view=self)
 
     @discord.ui.button(style=discord.ButtonStyle.primary)
     async def roll_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         game = self.game
+        if self._settled:
+            await interaction.response.send_message("This game has already ended.", ephemeral=True)
+            return
         if interaction.user.id != game.current_turn_id:
             await interaction.response.send_message("It's not your turn.", ephemeral=True)
             return
@@ -110,7 +120,7 @@ class RollView(discord.ui.View):
 
         if roll == 1:
             winner = _opponent(game, roller.id)
-            self._finish(winner, f"{roller.mention} rolled **1** — LOSER! {winner.mention} wins **{game.stake}** bullet(s)!")
+            self._finish(winner, f"{roller.mention} rolled **1** — LOSER! {winner.mention} wins **{game.stake}** bullet(s)!", "rolled_one")
             await interaction.response.edit_message(content=_final_message(game), view=self)
             return
 
@@ -200,6 +210,10 @@ class ChallengeView(discord.ui.View):
             )
             return
 
+        game_id = db.create_deathroll_game(
+            guild_id, self.challenger.id, acceptor.id, self.stake,
+            self.challenger.name, acceptor.name,
+        )
         game = DeathrollGame(
             guild_id=guild_id,
             challenger=self.challenger,
@@ -207,6 +221,7 @@ class ChallengeView(discord.ui.View):
             stake=self.stake,
             current_max=self.stake,
             current_turn_id=self.challenger.id,
+            id=game_id,
         )
         cog._clear_pending(guild_id, self.challenger.id, acceptor.id)
         cog._register_game(game)
@@ -249,25 +264,21 @@ class DeathrollCog(commands.Cog):
         self._games: dict[int, DeathrollGame] = {}
         self._players: dict[tuple[int, int], int] = {}
         self._pending: set[tuple[int, int]] = set()
-        self._next_id = 0
 
     def _register_game(self, game: DeathrollGame) -> int:
-        game_id = self._next_id
-        self._next_id += 1
-        self._games[game_id] = game
-        self._players[(game.guild_id, game.challenger.id)] = game_id
-        self._players[(game.guild_id, game.challengee.id)] = game_id
-        return game_id
+        self._games[game.id] = game
+        self._players[(game.guild_id, game.challenger.id)] = game.id
+        self._players[(game.guild_id, game.challengee.id)] = game.id
+        return game.id
 
     def _clear_pending(self, guild_id: int, challenger_id: int, challengee_id: int):
         self._pending.discard((guild_id, challenger_id))
         self._pending.discard((guild_id, challengee_id))
 
     def _end_game(self, game: DeathrollGame):
-        game_id = self._players.pop((game.guild_id, game.challenger.id), None)
+        self._players.pop((game.guild_id, game.challenger.id), None)
         self._players.pop((game.guild_id, game.challengee.id), None)
-        if game_id is not None:
-            self._games.pop(game_id, None)
+        self._games.pop(game.id, None)
 
     @app_commands.command(name="deathroll", description="Challenge a user (or anyone) to a deathroll for bullets")
     @app_commands.describe(user="The user to challenge (omit for an open challenge)", amount="Number of bullets to wager")
