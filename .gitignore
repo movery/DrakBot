@@ -4,6 +4,10 @@
 # Runtime database
 bullets.db
 
+# Launcher runtime artifacts
+drakbot.lock
+logs/
+
 # Python
 __pycache__/
 *.py[cod]

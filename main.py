@@ -1,3 +1,4 @@
+import logging
 import os
 import discord
 from discord.ext import commands
@@ -5,6 +6,8 @@ from dotenv import load_dotenv
 import db
 
 load_dotenv()
+
+log = logging.getLogger("drakbot")
 
 intents = discord.Intents.default()
 intents.voice_states = True
@@ -16,7 +19,7 @@ async def setup_hook():
     db.init_db()
     refunded = db.recover_deathroll_games()
     if refunded:
-        print(f"Refunded {len(refunded)} interrupted deathroll game(s).")
+        log.info("Refunded %d interrupted deathroll game(s).", len(refunded))
     await bot.load_extension("cogs.bullets")
     await bot.load_extension("cogs.flee")
     await bot.load_extension("cogs.daily")
@@ -29,8 +32,8 @@ bot.setup_hook = setup_hook
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    print("Synced slash commands.")
+    log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
+    log.info("Synced slash commands.")
 
 
 @bot.tree.command(name="ping", description="Check the bot's latency")
@@ -38,5 +41,16 @@ async def ping(interaction: discord.Interaction):
     await interaction.response.send_message(f"Pong! {round(bot.latency * 1000)}ms")
 
 
+def run(token: str | None = None):
+    """Start the bot. If logging is already configured (e.g. by launcher.py),
+    reuse it; otherwise let discord.py set up logging so `python main.py`
+    still produces output on its own."""
+    token = token or os.getenv("DISCORD_TOKEN")
+    if logging.getLogger().hasHandlers():
+        bot.run(token, log_handler=None)
+    else:
+        bot.run(token, root_logger=True)
+
+
 if __name__ == "__main__":
-    bot.run(os.getenv("DISCORD_TOKEN"))
+    run()

@@ -2,20 +2,22 @@
 
 ## Running the Bot
 
-Always use the virtual environment:
+Always use the virtual environment. The launcher is the intended entry point — it enforces a single instance (advisory file lock on `drakbot.lock`), sets up per-run logging under `logs/`, and verifies `DISCORD_TOKEN` before connecting:
 ```bash
-source .venv/bin/activate && python main.py
+source .venv/bin/activate && python launcher.py
 ```
+
+`python main.py` still works for quick dev (it falls back to discord.py's own console logging), but it does **not** take the single-instance lock — only `launcher.py` does.
 
 **Important:** When restarting, kill existing processes first in a separate command, then start fresh. Combining kill and start in a single shell command causes the shell to kill itself before the new bot launches:
 ```bash
 # Step 1 — kill
-kill $(ps aux | grep "[p]ython /home/movery/DrakBot/main.py" | awk '{print $2}') 2>/dev/null; true
+kill $(ps aux | grep "[p]ython /home/movery/DrakBot/\(launcher\|main\).py" | awk '{print $2}') 2>/dev/null; true
 # Step 2 — start (separate command)
-source .venv/bin/activate && python main.py
+source .venv/bin/activate && python launcher.py
 ```
 
-Multiple instances connecting with the same token will race to handle interactions — old instances must be cleared before starting a new one.
+Multiple instances connecting with the same token will race to handle interactions — old instances must be cleared before starting a new one. The launcher's lock prevents a second launcher from starting, but a stale `main.py` process must still be killed manually.
 
 ## Architecture
 
