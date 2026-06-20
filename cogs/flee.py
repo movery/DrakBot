@@ -1,7 +1,10 @@
+import logging
 import os
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+log = logging.getLogger(__name__)
 
 BULLET_ADMIN_ROLE = os.getenv("BULLET_ADMIN_ROLE", "")
 
@@ -39,14 +42,18 @@ class FleeCog(commands.Cog):
             return
 
         self._in_progress.add(channel.id)
+        moved = 0
         try:
             for m in others:
                 try:
                     await m.move_to(destination)
-                except discord.HTTPException:
-                    pass  # forbidden, disconnected mid-loop, or full channel — skip
+                    moved += 1
+                except discord.HTTPException as exc:
+                    # forbidden, disconnected mid-loop, or full channel — skip
+                    log.warning("could not move %s out of %s: %s", m, channel, exc)
         finally:
             self._in_progress.discard(channel.id)
+        log.info("fled %d member(s) from %s to %s", moved, channel, destination)
 
     @app_commands.command(name="flee", description="Set a user to flee from, or omit to disable")
     @app_commands.describe(user="The user others will flee from (omit to disable flee mode)")
@@ -60,11 +67,13 @@ class FleeCog(commands.Cog):
 
         if user:
             self._flee_targets[interaction.guild_id] = user.id
+            log.info("flee mode enabled in guild %s — target %s", interaction.guild_id, user)
             await interaction.response.send_message(f"Flee mode enabled — others will flee from {user.mention}.")
             if user.voice and user.voice.channel:
                 await self._do_flee(user.voice.channel, user.id)
         else:
             self._flee_targets.pop(interaction.guild_id, None)
+            log.info("flee mode disabled in guild %s", interaction.guild_id)
             await interaction.response.send_message("Flee mode disabled.")
 
     @commands.Cog.listener()

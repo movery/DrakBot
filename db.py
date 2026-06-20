@@ -1,7 +1,10 @@
 import sqlite3
 import datetime
+import logging
 import zoneinfo
 from contextlib import contextmanager
+
+log = logging.getLogger(__name__)
 
 _EST = zoneinfo.ZoneInfo("America/New_York")
 
@@ -57,6 +60,7 @@ def init_db():
                 finished_at     TEXT
             )
         """)
+    log.debug("database initialized at %s", DB_PATH)
 
 
 def get_bullets(guild_id: int, user_id: int) -> int:
@@ -220,4 +224,8 @@ def recover_deathroll_games() -> list:
                 SET status='refunded', outcome='refunded', finished_at=?
                 WHERE id=?
             """, (now, row["id"]))
+            log.info(
+                "refunded deathroll game %d: %d bullets each to players %d and %d",
+                row["id"], row["stake"], row["challenger_id"], row["challengee_id"]
+            )
         return rows

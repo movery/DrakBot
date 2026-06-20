@@ -1,11 +1,14 @@
 import os
 import random
 import datetime
+import logging
 import discord
 from discord import app_commands
 from discord.ext import commands
 import db
 
+
+log = logging.getLogger(__name__)
 
 BULLET_ADMIN_ROLE = os.getenv("BULLET_ADMIN_ROLE", "")
 
@@ -52,6 +55,7 @@ class BulletsCog(commands.Cog):
             await interaction.response.send_message(f"Amount can't exceed {MAX_AMOUNT}.", ephemeral=True)
             return
         new_total = db.add_bullets(interaction.guild_id, user.id, amount, user.name)
+        log.info("%s armed %s with %d bullet(s), new total %d", interaction.user, user, amount, new_total)
         await interaction.response.send_message(
             f"Armed {user.mention} with {amount} bullet(s). They now have **{new_total}**."
         )
@@ -62,6 +66,7 @@ class BulletsCog(commands.Cog):
         if await deny_if_not_admin(interaction):
             return
         db.set_bullets(interaction.guild_id, user.id, 0, user.name)
+        log.info("%s disarmed %s", interaction.user, user)
         await interaction.response.send_message(f"{user.mention} has been disarmed.")
 
     @app_commands.command(name="shoot", description="Spend 1 bullet to disconnect a user from voice")
@@ -92,6 +97,7 @@ class BulletsCog(commands.Cog):
             msg = f"CRITICAL FAIL! {interaction.user.mention} shot themselves and is timed out for 10 seconds! (Roll: **{roll}**)"
             timeout_error = _timeout_error(interaction.guild.me, interaction.user)
             if timeout_error:
+                log.warning("timeout not applied to %s: %s", interaction.user, timeout_error)
                 msg += f"\n({timeout_error})"
             else:
                 await interaction.user.timeout(timeout_duration)
@@ -99,7 +105,8 @@ class BulletsCog(commands.Cog):
             msg = f"CRITICAL HIT! {interaction.user.mention} obliterates {user.mention}, timing them out for 10 seconds! (Roll: **{roll}**)"
             try:
                 await user.move_to(None)
-            except discord.HTTPException:
+            except discord.HTTPException as e:
+                log.warning("move_to(None) failed for %s in guild %s: %s", user, interaction.guild_id, e)
                 db.add_bullets(interaction.guild_id, interaction.user.id, 1, interaction.user.name)
                 await interaction.response.send_message(
                     "Couldn't move that user (missing permission or they left voice). Bullet refunded.",
@@ -108,6 +115,7 @@ class BulletsCog(commands.Cog):
                 return
             timeout_error = _timeout_error(interaction.guild.me, user)
             if timeout_error:
+                log.warning("timeout not applied to %s: %s", user, timeout_error)
                 msg += f"\n({timeout_error})"
             else:
                 await user.timeout(timeout_duration)
@@ -115,7 +123,8 @@ class BulletsCog(commands.Cog):
             msg = f"{interaction.user.mention} shot {user.mention}! (Roll: **{roll}**)"
             try:
                 await user.move_to(None)
-            except discord.HTTPException:
+            except discord.HTTPException as e:
+                log.warning("move_to(None) failed for %s in guild %s: %s", user, interaction.guild_id, e)
                 db.add_bullets(interaction.guild_id, interaction.user.id, 1, interaction.user.name)
                 await interaction.response.send_message(
                     "Couldn't move that user (missing permission or they left voice). Bullet refunded.",
@@ -123,6 +132,7 @@ class BulletsCog(commands.Cog):
                 )
                 return
 
+        log.info("%s shot %s (roll %d)", interaction.user, user, roll)
         await interaction.response.send_message(msg)
 
     @app_commands.command(name="trade", description="Transfer bullets to another user")
@@ -149,6 +159,7 @@ class BulletsCog(commands.Cog):
         if not success:
             await interaction.response.send_message("You don't have enough bullets.", ephemeral=True)
             return
+        log.info("%s traded %d bullet(s) to %s", interaction.user, amount, user)
         await interaction.response.send_message(
             f"{interaction.user.mention} traded **{amount}** bullet(s) to {user.mention}."
         )

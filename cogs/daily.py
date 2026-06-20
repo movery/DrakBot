@@ -1,19 +1,27 @@
 import datetime
+import logging
 import os
 import discord
 from discord import app_commands
 from discord.ext import commands
 import db
 
+log = logging.getLogger(__name__)
+
 
 def _daily_amount() -> int:
     """Parse DAILY_BULLET_AMOUNT, falling back to 5 if it is unset, non-integer,
     or below 1. Done lazily so a bad value can't crash cog loading at import."""
+    raw = os.getenv("DAILY_BULLET_AMOUNT", "5")
     try:
-        amount = int(os.getenv("DAILY_BULLET_AMOUNT", "5"))
+        amount = int(raw)
     except ValueError:
+        log.warning("DAILY_BULLET_AMOUNT is not an integer (%r), falling back to 5", raw)
         return 5
-    return amount if amount >= 1 else 5
+    if amount < 1:
+        log.warning("DAILY_BULLET_AMOUNT is below 1 (%r), falling back to 5", raw)
+        return 5
+    return amount
 
 
 def _format_remaining(remaining: datetime.timedelta) -> str:

@@ -1,7 +1,10 @@
 import os
+import logging
 import datetime
 import discord
 from discord.ext import commands
+
+log = logging.getLogger(__name__)
 
 STREAM_GUARD_ENABLED = os.getenv("STREAM_GUARD_ENABLED", "false").lower() == "true"
 GUARD_WINDOW = 5  # seconds after joining during which streaming triggers a disconnect
@@ -50,9 +53,14 @@ class StreamGuardCog(commands.Cog):
         now = datetime.datetime.now(datetime.timezone.utc)
         if _within_window(join_time, now):
             try:
+                elapsed = (now - join_time).total_seconds()
+                log.info(
+                    "disconnecting %s in %s (channel %s) for streaming %.1fs after joining",
+                    member, member.guild, after.channel, elapsed,
+                )
                 await member.move_to(None)
-            except discord.HTTPException:
-                pass  # forbidden, or disconnected between the cached read and the move
+            except discord.HTTPException as exc:
+                log.warning("failed to disconnect %s: %s", member, exc)  # forbidden, or disconnected between the cached read and the move
             finally:
                 # Whether or not the move landed, don't act on this join again.
                 self._join_times.pop(key, None)

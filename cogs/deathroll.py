@@ -1,10 +1,13 @@
 import asyncio
+import logging
 import random
 from dataclasses import dataclass, field
 import discord
 from discord import app_commands
 from discord.ext import commands
 import db
+
+log = logging.getLogger(__name__)
 
 ROLL_TIMEOUT = 30
 WARN_AT = 20  # warn at 20s (10s remaining)
@@ -82,8 +85,9 @@ class RollView(discord.ui.View):
                     f"⏰ {turn_mention}, you have {ROLL_TIMEOUT - WARN_AT} seconds left to roll or you forfeit!",
                     delete_after=ROLL_TIMEOUT - WARN_AT,
                 )
-            except discord.HTTPException:
-                pass  # channel/message gone — the game still resolves on timeout
+            except discord.HTTPException as exc:
+                # channel/message gone — the game still resolves on timeout
+                log.warning("could not send turn warning for game %d: %s", self.game.id, exc)
 
     def _finish(self, winner: discord.Member, line: str, outcome: str):
         """Pay out the winner, settle the persisted game, and stop the view."""
@@ -91,6 +95,10 @@ class RollView(discord.ui.View):
         self._cancel_warn_task()
         db.add_bullets(self.game.guild_id, winner.id, self.game.stake * 2, winner.name)
         db.finish_deathroll_game(self.game.id, winner.id, outcome)
+        log.info(
+            "game %d settled: winner %s (%d), outcome %s, stake %d",
+            self.game.id, winner.name, winner.id, outcome, self.game.stake,
+        )
         self.cog._end_game(self.game)
         self.game.history.append(line)
         self.roll_button.disabled = True
@@ -225,6 +233,11 @@ class ChallengeView(discord.ui.View):
         )
         cog._clear_pending(guild_id, self.challenger.id, acceptor.id)
         cog._register_game(game)
+        log.info(
+            "game %d started in guild %d: %s (%d) vs %s (%d) for %d bullet(s)",
+            game.id, guild_id, self.challenger.name, self.challenger.id,
+            acceptor.name, acceptor.id, self.stake,
+        )
         self.stop()
 
         roll_view = RollView(game, cog)
