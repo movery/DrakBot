@@ -12,6 +12,7 @@ from cogs.deathroll import (
     DeathrollCog,
     _build_message,
     _turn_footer,
+    _format_leaderboard,
 )
 
 GUILD = 1
@@ -51,6 +52,27 @@ class MessageBuilderTests(unittest.TestCase):
         self.assertIn(self.alice.mention, _turn_footer(self.game))
         self.game.current_turn_id = self.bob.id
         self.assertIn(self.bob.mention, _turn_footer(self.game))
+
+
+class LeaderboardFormatTests(unittest.TestCase):
+    def test_ranks_and_signs(self):
+        out = _format_leaderboard([("alice", 120, 8, 3), ("bob", -30, 2, 5)])
+        lines = out.split("\n")
+        self.assertEqual(len(lines), 2)
+        self.assertIn("1.", lines[0])
+        self.assertIn("alice", lines[0])
+        self.assertIn("+120", lines[0])
+        self.assertIn("8W-3L", lines[0])
+        self.assertIn("2.", lines[1])
+        self.assertIn("-30", lines[1])
+
+    def test_long_name_truncated(self):
+        out = _format_leaderboard([("a_very_long_display_name", 5, 1, 0)])
+        self.assertIn("a_very_long_dis", out)  # truncated to 15 chars
+        self.assertNotIn("display", out)
+
+    def test_empty(self):
+        self.assertEqual(_format_leaderboard([]), "")
 
 
 class CogStateTests(unittest.TestCase):

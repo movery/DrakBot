@@ -55,6 +55,15 @@ def _turn_footer(game: DeathrollGame) -> str:
     return f"{turn_mention} rolls next (1–**{game.current_max}**)"
 
 
+def _format_leaderboard(entries: list[tuple[str, int, int, int]]) -> str:
+    """Render a monospace leaderboard table from already-ranked entries of
+    (display_name, net, wins, losses)."""
+    lines = []
+    for rank, (name, net, wins, losses) in enumerate(entries, start=1):
+        lines.append(f"{rank:>2}. {name[:15]:<15} {net:>+6}  ({wins}W-{losses}L)")
+    return "\n".join(lines)
+
+
 class RollView(discord.ui.View):
     def __init__(self, game: DeathrollGame, cog: "DeathrollCog"):
         super().__init__(timeout=ROLL_TIMEOUT)
@@ -334,6 +343,28 @@ class DeathrollCog(commands.Cog):
 
         await interaction.response.send_message(msg, view=view)
         view.message = await interaction.original_response()
+
+    @app_commands.command(
+        name="deathroll-leaderboard",
+        description="Show the deathroll leaderboard (net bullets won/lost)",
+    )
+    @app_commands.guild_only()
+    async def deathroll_leaderboard(self, interaction: discord.Interaction):
+        rows = db.deathroll_leaderboard(interaction.guild_id)
+        if not rows:
+            await interaction.response.send_message("No deathroll games have been completed yet.")
+            return
+
+        entries = []
+        for row in rows[:10]:
+            member = interaction.guild.get_member(row["user_id"])
+            name = member.display_name if member else (row["name"] or f"User {row['user_id']}")
+            entries.append((name, row["net"], row["wins"], row["losses"]))
+
+        table = _format_leaderboard(entries)
+        await interaction.response.send_message(
+            f"🎲 **Deathroll Leaderboard** — net bullets won/lost\n```\n{table}\n```"
+        )
 
 
 async def setup(bot: commands.Bot):

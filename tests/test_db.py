@@ -229,5 +229,44 @@ class DeathrollGameTests(DbTestCase):
         self.assertEqual(db.get_bullets(GUILD, ALICE), 10)  # not double-refunded
 
 
+class DeathrollLeaderboardTests(DbTestCase):
+    def _finished_game(self, challenger, challengee, stake, winner):
+        gid = db.create_deathroll_game(
+            GUILD, challenger, challengee, stake, f"u{challenger}", f"u{challengee}"
+        )
+        db.finish_deathroll_game(gid, winner, "rolled_one")
+        return gid
+
+    def test_empty_when_no_games(self):
+        self.assertEqual(db.deathroll_leaderboard(GUILD), [])
+
+    def test_net_win_and_loss(self):
+        self._finished_game(ALICE, BOB, 10, winner=ALICE)
+        board = {row["user_id"]: row for row in db.deathroll_leaderboard(GUILD)}
+        self.assertEqual(board[ALICE]["net"], 10)
+        self.assertEqual(board[ALICE]["wins"], 1)
+        self.assertEqual(board[ALICE]["losses"], 0)
+        self.assertEqual(board[BOB]["net"], -10)
+        self.assertEqual(board[BOB]["losses"], 1)
+
+    def test_accumulates_across_games_and_sorts_by_net(self):
+        self._finished_game(ALICE, BOB, 10, winner=ALICE)   # A +10, B -10
+        self._finished_game(BOB, ALICE, 5, winner=BOB)      # B +5,  A -5
+        board = db.deathroll_leaderboard(GUILD)
+        self.assertEqual([r["user_id"] for r in board], [ALICE, BOB])  # sorted by net desc
+        nets = {r["user_id"]: r["net"] for r in board}
+        self.assertEqual(nets[ALICE], 5)
+        self.assertEqual(nets[BOB], -5)
+
+    def test_active_and_refunded_games_excluded(self):
+        db.create_deathroll_game(GUILD, ALICE, BOB, 10)  # active, never finished
+        db.recover_deathroll_games()                     # -> refunded
+        self.assertEqual(db.deathroll_leaderboard(GUILD), [])
+
+    def test_other_guild_excluded(self):
+        self._finished_game(ALICE, BOB, 10, winner=ALICE)
+        self.assertEqual(db.deathroll_leaderboard(GUILD + 1), [])
+
+
 if __name__ == "__main__":
     unittest.main()

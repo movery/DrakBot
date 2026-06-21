@@ -229,3 +229,39 @@ def recover_deathroll_games() -> list:
                 row["id"], row["stake"], row["challenger_id"], row["challengee_id"]
             )
         return rows
+
+
+def deathroll_leaderboard(guild_id: int) -> list[dict]:
+    """Net bullets won/lost per player across finished deathroll games.
+
+    Each finished game moves `stake` from the loser to the winner, so the
+    winner's net for that game is +stake and the loser's is -stake. Active and
+    refunded games net zero and are excluded. Returns one dict per player —
+    {user_id, name, net, wins, losses} — sorted by net descending.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT challenger_id, challenger_name, challengee_id, challengee_name, "
+            "stake, winner_id FROM deathroll_games "
+            "WHERE guild_id=? AND status='finished' ORDER BY finished_at",
+            (guild_id,)
+        ).fetchall()
+
+    stats: dict[int, dict] = {}
+    for row in rows:
+        for uid, name in (
+            (row["challenger_id"], row["challenger_name"]),
+            (row["challengee_id"], row["challengee_name"]),
+        ):
+            entry = stats.setdefault(
+                uid, {"user_id": uid, "name": name, "net": 0, "wins": 0, "losses": 0}
+            )
+            if name:  # rows are time-ordered, so this keeps the most recent name
+                entry["name"] = name
+            if row["winner_id"] == uid:
+                entry["net"] += row["stake"]
+                entry["wins"] += 1
+            else:
+                entry["net"] -= row["stake"]
+                entry["losses"] += 1
+    return sorted(stats.values(), key=lambda e: e["net"], reverse=True)
