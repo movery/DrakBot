@@ -72,10 +72,26 @@ def init_db():
                 status      TEXT NOT NULL,
                 net         INTEGER,
                 outcome     TEXT,
+                wins        INTEGER NOT NULL DEFAULT 0,
+                losses      INTEGER NOT NULL DEFAULT 0,
+                pushes      INTEGER NOT NULL DEFAULT 0,
                 created_at  TEXT NOT NULL,
                 finished_at TEXT
             )
         """)
+        # A round can produce several hands (splits), so W/L/P are counted per
+        # hand rather than inferred from the round's net. Migrate older rows that
+        # predate these columns.
+        bj_columns = [row[1] for row in conn.execute("PRAGMA table_info(blackjack_games)").fetchall()]
+        for col in ("wins", "losses", "pushes"):
+            if col not in bj_columns:
+                conn.execute(f"ALTER TABLE blackjack_games ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
+        if "wins" not in bj_columns:
+            # Best-effort backfill for single-hand rounds settled before this
+            # change (only the net was stored). Split rounds can't be recovered.
+            conn.execute("UPDATE blackjack_games SET wins=1 WHERE status='finished' AND net>0")
+            conn.execute("UPDATE blackjack_games SET losses=1 WHERE status='finished' AND net<0")
+            conn.execute("UPDATE blackjack_games SET pushes=1 WHERE status='finished' AND net=0")
     log.debug("database initialized at %s", DB_PATH)
 
 
@@ -311,15 +327,17 @@ def set_blackjack_escrow(game_id: int, escrow: int):
         )
 
 
-def finish_blackjack_game(game_id: int, net: int, outcome: str):
-    """Settle a round: mark it finished and record the net result and outcome."""
+def finish_blackjack_game(game_id: int, net: int, outcome: str,
+                          wins: int = 0, losses: int = 0, pushes: int = 0):
+    """Settle a round: mark it finished and record the net result, outcome, and
+    the per-hand win/loss/push tallies (a split round resolves several hands)."""
     now = datetime.datetime.now(_EST).isoformat()
     with _connect() as conn:
         conn.execute("""
             UPDATE blackjack_games
-            SET status='finished', net=?, outcome=?, finished_at=?
+            SET status='finished', net=?, outcome=?, wins=?, losses=?, pushes=?, finished_at=?
             WHERE id=? AND status='active'
-        """, (net, outcome, now, game_id))
+        """, (net, outcome, wins, losses, pushes, now, game_id))
 
 
 def recover_blackjack_games() -> list:
@@ -358,13 +376,13 @@ def blackjack_leaderboard(guild_id: int) -> list[dict]:
     """Net bullets won/lost per player across finished blackjack rounds.
 
     A round's `net` is the player's profit (+) or loss (-) against the house.
-    Rounds with net > 0 count as wins, < 0 as losses, == 0 as pushes. Active and
-    refunded rounds are excluded. Returns one dict per player —
-    {user_id, name, net, wins, losses, pushes} — sorted by net descending.
+    Win/loss/push are counted per hand (so a split round can add to more than
+    one tally). Active and refunded rounds are excluded. Returns one dict per
+    player — {user_id, name, net, wins, losses, pushes} — sorted by net descending.
     """
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT user_id, user_name, net FROM blackjack_games "
+            "SELECT user_id, user_name, net, wins, losses, pushes FROM blackjack_games "
             "WHERE guild_id=? AND status='finished' ORDER BY finished_at",
             (guild_id,)
         ).fetchall()
@@ -378,12 +396,8 @@ def blackjack_leaderboard(guild_id: int) -> list[dict]:
         )
         if row["user_name"]:  # rows are time-ordered, so this keeps the latest name
             entry["name"] = row["user_name"]
-        net = row["net"] or 0
-        entry["net"] += net
-        if net > 0:
-            entry["wins"] += 1
-        elif net < 0:
-            entry["losses"] += 1
-        else:
-            entry["pushes"] += 1
+        entry["net"] += row["net"] or 0
+        entry["wins"] += row["wins"]
+        entry["losses"] += row["losses"]
+        entry["pushes"] += row["pushes"]
     return sorted(stats.values(), key=lambda e: e["net"], reverse=True)

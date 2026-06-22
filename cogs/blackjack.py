@@ -90,7 +90,11 @@ class BlackjackView(discord.ui.View):
             db.add_bullets(self.guild_id, self.player.id, settlement.total_return, self.player.name)
         self.net = settlement.total_return - self.escrow
         outcome = "win" if self.net > 0 else "loss" if self.net < 0 else "push"
-        db.finish_blackjack_game(self.game_id, self.net, outcome)
+        # Count each hand separately so a split round records every result.
+        wins = sum(1 for r in settlement.hands if r.outcome in ("win", "blackjack"))
+        losses = sum(1 for r in settlement.hands if r.outcome == "loss")
+        pushes = sum(1 for r in settlement.hands if r.outcome == "push")
+        db.finish_blackjack_game(self.game_id, self.net, outcome, wins, losses, pushes)
         self.cog._active.discard((self.guild_id, self.player.id))
         self.settlement = settlement
         log.info(

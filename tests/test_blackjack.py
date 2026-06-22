@@ -239,7 +239,7 @@ class BlackjackDbTests(unittest.TestCase):
         db.deduct_bullets(GUILD, ALICE, 10, "alice")
         gid = db.create_blackjack_game(GUILD, ALICE, 10, "alice")
         db.add_bullets(GUILD, ALICE, 20, "alice")  # simulate a win payout
-        db.finish_blackjack_game(gid, 10, "win")
+        db.finish_blackjack_game(gid, 10, "win", wins=1)
         rows = db.blackjack_leaderboard(GUILD)
         self.assertEqual(rows[0]["net"], 10)
         self.assertEqual(rows[0]["wins"], 1)
@@ -259,11 +259,24 @@ class BlackjackDbTests(unittest.TestCase):
 
     def test_leaderboard_counts_wins_losses_pushes(self):
         db.add_bullets(GUILD, ALICE, 100, "alice")
-        for net, outcome in ((10, "win"), (-5, "loss"), (0, "push")):
+        for net, outcome, w, l, p in (
+            (10, "win", 1, 0, 0),
+            (-5, "loss", 0, 1, 0),
+            (0, "push", 0, 0, 1),
+        ):
             gid = db.create_blackjack_game(GUILD, ALICE, 5, "alice")
-            db.finish_blackjack_game(gid, net, outcome)
+            db.finish_blackjack_game(gid, net, outcome, w, l, p)
         row = db.blackjack_leaderboard(GUILD)[0]
         self.assertEqual((row["net"], row["wins"], row["losses"], row["pushes"]), (5, 1, 1, 1))
+
+    def test_split_round_counts_each_hand(self):
+        # A single split round that lost one hand and pushed the other must
+        # record both a loss and a push, even though the net is negative.
+        db.add_bullets(GUILD, BOB, 100, "bob")
+        gid = db.create_blackjack_game(GUILD, BOB, 5, "bob")
+        db.finish_blackjack_game(gid, -5, "loss", wins=0, losses=1, pushes=1)
+        row = db.blackjack_leaderboard(GUILD)[0]
+        self.assertEqual((row["net"], row["wins"], row["losses"], row["pushes"]), (-5, 0, 1, 1))
 
 
 if __name__ == "__main__":
