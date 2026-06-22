@@ -20,10 +20,14 @@ async def setup_hook():
     refunded = db.recover_deathroll_games()
     if refunded:
         log.info("Refunded %d interrupted deathroll game(s).", len(refunded))
+    refunded_bj = db.recover_blackjack_games()
+    if refunded_bj:
+        log.info("Refunded %d interrupted blackjack game(s).", len(refunded_bj))
     await bot.load_extension("cogs.bullets")
     await bot.load_extension("cogs.flee")
     await bot.load_extension("cogs.daily")
     await bot.load_extension("cogs.deathroll")
+    await bot.load_extension("cogs.blackjack")
     await bot.load_extension("cogs.stream_guard")
 
 bot.setup_hook = setup_hook

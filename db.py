@@ -60,6 +60,22 @@ def init_db():
                 finished_at     TEXT
             )
         """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS blackjack_games (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id    INTEGER NOT NULL,
+                user_id     INTEGER NOT NULL,
+                user_name   TEXT,
+                wager       INTEGER NOT NULL,
+                escrow      INTEGER NOT NULL,
+                status      TEXT NOT NULL,
+                net         INTEGER,
+                outcome     TEXT,
+                created_at  TEXT NOT NULL,
+                finished_at TEXT
+            )
+        """)
     log.debug("database initialized at %s", DB_PATH)
 
 
@@ -264,4 +280,110 @@ def deathroll_leaderboard(guild_id: int) -> list[dict]:
             else:
                 entry["net"] -= row["stake"]
                 entry["losses"] += 1
+    return sorted(stats.values(), key=lambda e: e["net"], reverse=True)
+
+
+def create_blackjack_game(
+    guild_id: int, user_id: int, wager: int, user_name: str | None = None
+) -> int:
+    """Record a newly started round (status 'active') and return its row id.
+
+    `escrow` starts at `wager` — the bullets already deducted from the player —
+    and is bumped as the player commits more (double/split/insurance) so the
+    full amount can be refunded if the bot stops mid-round.
+    """
+    now = datetime.datetime.now(_EST).isoformat()
+    with _connect() as conn:
+        cursor = conn.execute("""
+            INSERT INTO blackjack_games
+                (guild_id, user_id, user_name, wager, escrow, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'active', ?)
+        """, (guild_id, user_id, user_name, wager, wager, now))
+        return cursor.lastrowid
+
+
+def set_blackjack_escrow(game_id: int, escrow: int):
+    """Update the held-bullets total after the player commits more."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE blackjack_games SET escrow=? WHERE id=? AND status='active'",
+            (escrow, game_id)
+        )
+
+
+def finish_blackjack_game(game_id: int, net: int, outcome: str):
+    """Settle a round: mark it finished and record the net result and outcome."""
+    now = datetime.datetime.now(_EST).isoformat()
+    with _connect() as conn:
+        conn.execute("""
+            UPDATE blackjack_games
+            SET status='finished', net=?, outcome=?, finished_at=?
+            WHERE id=? AND status='active'
+        """, (net, outcome, now, game_id))
+
+
+def recover_blackjack_games() -> list:
+    """Refund the held escrow for any round left 'active' by a crash/restart.
+
+    The in-memory game and its UI are gone after a restart, so an interrupted
+    round can't resume — the player gets every committed bullet back and the row
+    is marked 'refunded'. Returns the refunded rows (for logging).
+    """
+    now = datetime.datetime.now(_EST).isoformat()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM blackjack_games WHERE status='active'"
+        ).fetchall()
+        for row in rows:
+            conn.execute("""
+                INSERT INTO bullets (guild_id, user_id, amount, nickname)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                    amount = amount + excluded.amount,
+                    nickname = COALESCE(excluded.nickname, nickname)
+            """, (row["guild_id"], row["user_id"], row["escrow"], row["user_name"]))
+            conn.execute("""
+                UPDATE blackjack_games
+                SET status='refunded', outcome='refunded', finished_at=?
+                WHERE id=?
+            """, (now, row["id"]))
+            log.info(
+                "refunded blackjack game %d: %d bullets to player %d",
+                row["id"], row["escrow"], row["user_id"]
+            )
+        return rows
+
+
+def blackjack_leaderboard(guild_id: int) -> list[dict]:
+    """Net bullets won/lost per player across finished blackjack rounds.
+
+    A round's `net` is the player's profit (+) or loss (-) against the house.
+    Rounds with net > 0 count as wins, < 0 as losses, == 0 as pushes. Active and
+    refunded rounds are excluded. Returns one dict per player —
+    {user_id, name, net, wins, losses, pushes} — sorted by net descending.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT user_id, user_name, net FROM blackjack_games "
+            "WHERE guild_id=? AND status='finished' ORDER BY finished_at",
+            (guild_id,)
+        ).fetchall()
+
+    stats: dict[int, dict] = {}
+    for row in rows:
+        entry = stats.setdefault(
+            row["user_id"],
+            {"user_id": row["user_id"], "name": row["user_name"],
+             "net": 0, "wins": 0, "losses": 0, "pushes": 0},
+        )
+        if row["user_name"]:  # rows are time-ordered, so this keeps the latest name
+            entry["name"] = row["user_name"]
+        net = row["net"] or 0
+        entry["net"] += net
+        if net > 0:
+            entry["wins"] += 1
+        elif net < 0:
+            entry["losses"] += 1
+        else:
+            entry["pushes"] += 1
     return sorted(stats.values(), key=lambda e: e["net"], reverse=True)

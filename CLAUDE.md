@@ -88,6 +88,7 @@ source .venv/bin/activate && python -m unittest discover -s tests
 
 - `tests/test_db.py` — characterization tests for every `db.py` function, run against a throwaway SQLite file (`db.DB_PATH` is repointed in `setUp`).
 - `tests/test_deathroll.py` — pure message builders and the in-memory game/pending state tracking on `DeathrollCog`.
+- `tests/test_blackjack.py` — the pure `blackjack_engine` (totals, dealer S17, naturals, double, insurance, split/re-split/DAS) plus the blackjack `db.py` functions. The engine draws from the front of its shoe, so tests fix the draw order via `_test_shoe`.
 
 When changing `db.py` or deathroll state logic, run the suite first to capture a green baseline, then again after the change. Discord interaction handlers are not unit-tested (they require heavy mocking) — verify those by running the bot.
 
@@ -99,4 +100,18 @@ When changing `db.py` or deathroll state logic, run the suite first to capture a
 | `cogs/daily.py` | `/daily` — once-per-calendar-day bullet grant (resets midnight EST) |
 | `cogs/flee.py` | `/flee` — moves other users out of a designated user's voice channel |
 | `cogs/deathroll.py` | `/deathroll` — bullet gambling game with Discord UI buttons |
+| `cogs/blackjack.py` | `/blackjack`, `/blackjack-leaderboard` — solo blackjack vs the dealer for bullets |
 | `cogs/stream_guard.py` | Disconnects users who stream within 5s of joining voice |
+
+### Blackjack (`cogs/blackjack.py` + `blackjack_engine.py`)
+Pure game logic lives in the discord-free `blackjack_engine.py` (so it is unit-tested
+directly); the cog is only the Discord UI, bullet escrow, and persistence. House rules are
+fixed: 6-deck shoe with a continuous shuffler (a fresh shuffled shoe per round — nothing to
+count), 3:2 blackjack (floored, since bullets are integers), dealer stands on soft 17,
+dealer peeks on an Ace/ten up-card, double on any first two cards, double-after-split,
+split/re-split up to four hands, split aces get one card and can't re-split, insurance on a
+dealer Ace, and **no surrender**. Minimum buy-in is 5 bullets.
+
+Bullets are escrowed like deathroll: the base bet is deducted up front and each
+double/split/insurance deducts more, with the running total stored in `blackjack_games.escrow`
+so an interrupted round is fully refunded by `db.recover_blackjack_games()` on startup.
