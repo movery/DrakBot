@@ -43,6 +43,26 @@ A WoW-inspired gambling game. Players alternate rolling a shrinking number — w
 - The challenger or challengee can cancel/decline before the game starts
 - Only one active or pending challenge per user at a time
 
+### Blackjack
+Solo blackjack against the dealer, played through Discord buttons and wagered in bullets.
+
+| Command | Description |
+|---|---|
+| `/blackjack amount` | Deal a hand and bet the given number of bullets |
+| `/blackjack-leaderboard` | Show the top players ranked by net bullets won/lost (with W-L-P records) |
+
+House rules (fixed):
+- **Minimum bet: 5 bullets**
+- 6-deck shoe with a continuous shuffler — a fresh shuffled shoe each round, so there is nothing to count
+- Blackjack pays **3:2** (floored, since bullets are integers)
+- Dealer stands on soft 17 and peeks on an Ace or ten up-card
+- **Double** on any first two cards, including **double-after-split**
+- **Split / re-split** up to four hands; split aces get one card each and can't re-split
+- **Insurance** offered on a dealer Ace
+- **No surrender**
+
+Bullets are escrowed when the hand is dealt — the base bet up front, with each double/split/insurance deducting more — so an interrupted round is fully refunded on the next startup. Each player has **120 seconds** to act before the round auto-resolves. Win/loss/push records are tracked per hand, so a split round can score multiple results at once.
+
 ### Stream Guard
 When enabled, any user who starts streaming video (camera or Go Live) within 5 seconds of joining a voice channel is automatically disconnected. Controlled via the `STREAM_GUARD_ENABLED` env var.
 
@@ -114,6 +134,7 @@ The suite lives in `tests/` and covers:
 
 - **`tests/test_db.py`** — every function in the bullet-economy database layer, run against a throwaway SQLite file (the schema migration, atomic deductions, transfers, and the daily-claim cooldown/reset cycle).
 - **`tests/test_deathroll.py`** — the deathroll message builders and the in-memory game/pending-challenge state tracking.
+- **`tests/test_blackjack.py`** — the discord-free `blackjack_engine` (totals, dealer soft-17, naturals, double, insurance, split/re-split/DAS) plus the blackjack database functions.
 
 Discord interaction handlers are not unit-tested (they require a live gateway connection); verify those by running the bot. Run the suite before and after any change to `db.py` or the deathroll game logic to confirm behavior is preserved.
 
