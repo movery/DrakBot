@@ -72,6 +72,8 @@ class BulletsCog(commands.Cog):
     @app_commands.command(name="shoot", description="Spend 1 bullet to disconnect a user from voice")
     @app_commands.describe(user="The user to shoot")
     async def shoot(self, interaction: discord.Interaction, user: discord.Member):
+         if user == interaction.user:
+            await interaction.response.send_message("Call or text 988 to reach the 988 Suicide & Crisis Lifeline.", ephemeral=True)
         if user.bot:
             await interaction.response.send_message("You can't shoot a bot.", ephemeral=True)
             return
