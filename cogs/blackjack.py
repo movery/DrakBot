@@ -1,16 +1,21 @@
+import asyncio
 import logging
+from dataclasses import dataclass
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 import db
-from blackjack_engine import BlackjackGame, hand_total, is_blackjack
+from blackjack_engine import BlackjackGame, BlackjackTable, hand_total, is_blackjack
 
 log = logging.getLogger(__name__)
 
 MIN_BET = 5
 GAME_TIMEOUT = 120  # seconds a player has to act before the round auto-resolves
+MAX_SEATS = 6  # players who can sit at a multiplayer table
+LOBBY_SECONDS = 15  # window to sit down and wager before a table deals
+TURN_TIMEOUT = 30  # seconds a multiplayer player has before being auto-stood
 
 RESULT_LABELS = {
     "blackjack": "BLACKJACK ✅ (3:2)",
@@ -269,9 +274,427 @@ class BlackjackView(discord.ui.View):
         await self._refresh(interaction)
 
 
+# ===================== multiplayer table =====================
+
+@dataclass
+class Seat:
+    """One player's place at a multiplayer table (bullet bookkeeping + their game)."""
+    player: discord.Member
+    game_id: int          # blackjack_games row id (created at sit time)
+    escrow: int           # bullets held so far (wager + double/split/insurance)
+    game: BlackjackGame | None = None  # the engine seat, attached when the round deals
+    net: int = 0          # filled in at settlement, for the final summary
+
+
+class WagerModal(discord.ui.Modal, title="Sit at the Blackjack Table"):
+    amount = discord.ui.TextInput(
+        label=f"Wager — multiple of {MIN_BET} (min {MIN_BET})",
+        placeholder=f"e.g. {MIN_BET * 5}",
+        required=True,
+        max_length=9,
+    )
+
+    def __init__(self, lobby: "LobbyView"):
+        super().__init__()
+        self.lobby = lobby
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.lobby.handle_sit(interaction, str(self.amount.value))
+
+
+class LobbyView(discord.ui.View):
+    """The 15-second open lobby: anyone can sit and name their own wager."""
+
+    def __init__(self, cog: "BlackjackCog", guild_id: int, channel_id: int, host: discord.Member):
+        super().__init__(timeout=LOBBY_SECONDS)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+        self.host = host
+        self.seats: list[Seat] = []
+        self.message: discord.Message | None = None
+        self._closed = False
+
+    def render(self) -> str:
+        lines = [
+            f"🃏 **Multiplayer Blackjack** — opened by {self.host.mention}",
+            f"Press **Sit at table** and name your wager (a multiple of {MIN_BET}). "
+            f"The table deals in ~{LOBBY_SECONDS}s.",
+        ]
+        if self.seats:
+            lines.append("\n**Seated:**")
+            for seat in self.seats:
+                lines.append(f"• {seat.player.mention} — **{seat.escrow}** bullet(s)")
+        else:
+            lines.append("\n_No players seated yet._")
+        lines.append(f"\nSeats: **{len(self.seats)}/{MAX_SEATS}**")
+        return "\n".join(lines)
+
+    @discord.ui.button(label="Sit at table", style=discord.ButtonStyle.success)
+    async def sit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self._closed:
+            await interaction.response.send_message("The lobby has already closed.", ephemeral=True)
+            return
+        if any(s.player.id == interaction.user.id for s in self.seats):
+            await interaction.response.send_message("You're already seated.", ephemeral=True)
+            return
+        if len(self.seats) >= MAX_SEATS:
+            await interaction.response.send_message("The table is full.", ephemeral=True)
+            return
+        if (self.guild_id, interaction.user.id) in self.cog._active:
+            await interaction.response.send_message("You're already in a blackjack game.", ephemeral=True)
+            return
+        await interaction.response.send_modal(WagerModal(self))
+
+    async def handle_sit(self, interaction: discord.Interaction, raw: str):
+        try:
+            amount = int(raw.strip())
+        except ValueError:
+            await interaction.response.send_message("Enter a whole number of bullets.", ephemeral=True)
+            return
+        if amount < MIN_BET or amount % MIN_BET != 0:
+            await interaction.response.send_message(
+                f"Your wager must be a multiple of {MIN_BET} (minimum {MIN_BET}).", ephemeral=True
+            )
+            return
+        # Re-check everything: state may have changed while the modal was open.
+        if self._closed:
+            await interaction.response.send_message("The lobby has already closed.", ephemeral=True)
+            return
+        if any(s.player.id == interaction.user.id for s in self.seats):
+            await interaction.response.send_message("You're already seated.", ephemeral=True)
+            return
+        if len(self.seats) >= MAX_SEATS:
+            await interaction.response.send_message("The table is full.", ephemeral=True)
+            return
+        if (self.guild_id, interaction.user.id) in self.cog._active:
+            await interaction.response.send_message("You're already in a blackjack game.", ephemeral=True)
+            return
+        if db.get_bullets(self.guild_id, interaction.user.id) < amount:
+            await interaction.response.send_message("You don't have enough bullets.", ephemeral=True)
+            return
+        if not db.deduct_bullets(self.guild_id, interaction.user.id, amount, interaction.user.name):
+            await interaction.response.send_message("You don't have enough bullets.", ephemeral=True)
+            return
+
+        # Create the row now so a crash during the lobby is refunded on restart.
+        game_id = db.create_blackjack_game(self.guild_id, interaction.user.id, amount, interaction.user.name)
+        self.cog._active.add((self.guild_id, interaction.user.id))
+        self.seats.append(Seat(player=interaction.user, game_id=game_id, escrow=amount))
+        await interaction.response.send_message(
+            f"You're seated for **{amount}** bullet(s). Good luck!", ephemeral=True
+        )
+        if self.message:
+            await self.message.edit(content=self.render(), view=self)
+
+    async def on_timeout(self):
+        if self._closed:
+            return
+        self._closed = True
+        self.cog._tables.pop(self.channel_id, None)
+        if not self.seats:
+            if self.message:
+                await self.message.edit(
+                    content="🃏 Multiplayer blackjack — nobody sat down. Table closed.", view=None
+                )
+            return
+        table = BlackjackTable()
+        for seat in self.seats:
+            seat.game = table.add_seat(seat.escrow)
+        table.deal()
+        view = TableView(self.cog, self.guild_id, self.channel_id, table, self.seats)
+        self.cog._tables[self.channel_id] = view
+        if self.message:
+            await view.start(self.message)
+
+
+class TableView(discord.ui.View):
+    """Sequential multiplayer round: only the current player's buttons act."""
+
+    def __init__(self, cog: "BlackjackCog", guild_id: int, channel_id: int,
+                 table: BlackjackTable, seats: list[Seat]):
+        super().__init__(timeout=None)  # the turn clock drives timeouts, not the View
+        self.cog = cog
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+        self.table = table
+        self.seats = seats  # parallel to table.seats
+        self.message: discord.Message | None = None
+        self.settlements = None
+        self._settled = False
+        self._turn_task: asyncio.Task | None = None
+        self._turn_gen = 0  # bumped on every turn change to invalidate a stale timer
+
+    @property
+    def current(self) -> Seat | None:
+        if self.table.phase in ("insurance", "player"):
+            return self.seats[self.table.turn]
+        return None
+
+    async def start(self, message: discord.Message):
+        self.message = message
+        self._maybe_finish()  # a dealt natural / dealer blackjack can end it at once
+        self._sync()
+        view = None if self._settled else self
+        await message.edit(content=self.render(), view=view)
+        if not self._settled:
+            self._reset_turn_timer()
+
+    # --- bullet helpers ----------------------------------------------------
+    def _commit(self, seat: Seat, amount: int) -> bool:
+        if not db.deduct_bullets(self.guild_id, seat.player.id, amount, seat.player.name):
+            return False
+        seat.escrow += amount
+        db.set_blackjack_escrow(seat.game_id, seat.escrow)
+        return True
+
+    # --- round lifecycle ---------------------------------------------------
+    def _maybe_finish(self):
+        if self.table.phase == "done" and not self._settled:
+            self._finalize()
+
+    def _finalize(self):
+        if self._settled:
+            return
+        self._settled = True
+        self._cancel_turn_timer()
+        self.settlements = self.table.settle()
+        for seat, settlement in zip(self.seats, self.settlements):
+            if settlement.total_return > 0:
+                db.add_bullets(self.guild_id, seat.player.id, settlement.total_return, seat.player.name)
+            seat.net = settlement.total_return - seat.escrow
+            outcome = "win" if seat.net > 0 else "loss" if seat.net < 0 else "push"
+            wins = sum(1 for r in settlement.hands if r.outcome in ("win", "blackjack"))
+            losses = sum(1 for r in settlement.hands if r.outcome == "loss")
+            pushes = sum(1 for r in settlement.hands if r.outcome == "push")
+            db.finish_blackjack_game(seat.game_id, seat.net, outcome, wins, losses, pushes)
+            self.cog._active.discard((self.guild_id, seat.player.id))
+        self.cog._tables.pop(self.channel_id, None)
+        log.info(
+            "multiplayer blackjack settled in guild %d: %d seat(s)",
+            self.guild_id, len(self.seats),
+        )
+        self.stop()
+
+    def _advance(self):
+        if self.table.phase == "insurance":
+            self.table.advance_insurance()
+        elif self.table.phase == "player":
+            self.table.advance_player()
+        self._maybe_finish()
+
+    # --- turn clock --------------------------------------------------------
+    def _reset_turn_timer(self):
+        self._cancel_turn_timer()
+        self._turn_gen += 1
+        if self._settled or self.current is None:
+            return
+        self._turn_task = asyncio.create_task(self._turn_timer(self._turn_gen))
+
+    def _cancel_turn_timer(self):
+        if self._turn_task and not self._turn_task.done():
+            self._turn_task.cancel()
+        self._turn_task = None
+
+    async def _turn_timer(self, gen: int):
+        try:
+            await asyncio.sleep(TURN_TIMEOUT)
+        except asyncio.CancelledError:
+            return
+        # A button press (or a prior timeout) advanced the turn while we slept.
+        if gen != self._turn_gen or self._settled:
+            return
+        seat = self.current
+        if seat is None:
+            return
+        if seat.game.phase == "insurance":
+            seat.game.decline_insurance()
+        elif seat.game.phase == "player":
+            seat.game.stand_all()
+        else:
+            return
+        self._advance()
+        self._sync()
+        if self.message:
+            view = None if self._settled else self
+            try:
+                await self.message.edit(content=self.render(), view=view)
+            except discord.HTTPException:
+                pass
+        self._reset_turn_timer()
+
+    # --- rendering ---------------------------------------------------------
+    def _dealer_line(self) -> str:
+        if self.table.phase in ("insurance", "player"):
+            return f"**Dealer:** {self.table.dealer[0]} 🂠"
+        return f"**Dealer:** {_fmt(self.table.dealer)}  {_total_tag(self.table.dealer)}"
+
+    def _seat_lines(self, idx: int, seat: Seat) -> list[str]:
+        game = seat.game
+        results = self.settlements[idx].hands if self.settlements else [None] * len(game.hands)
+        is_current = self.current is seat
+        out = []
+        for hidx, hand in enumerate(game.hands):
+            active = is_current and game.phase == "player" and hidx == game.active and not self._settled
+            marker = "▶" if active else "　"
+            label_name = seat.player.display_name
+            prefix = label_name if len(game.hands) == 1 else f"{label_name} #{hidx + 1}"
+            bet_tag = f" • bet {hand.bet}" + (" (doubled)" if hand.doubled else "")
+            result = results[hidx]
+            res_label = f" — {RESULT_LABELS[result.outcome]}" if result else ""
+            tag = _total_tag(hand.cards, natural=hand.is_natural_blackjack)
+            out.append(f"{marker} **{prefix}:** {_fmt(hand.cards)}  {tag}{bet_tag}{res_label}")
+        return out
+
+    def render(self) -> str:
+        lines = ["🃏 **Multiplayer Blackjack**", self._dealer_line(), ""]
+        for idx, seat in enumerate(self.seats):
+            lines.extend(self._seat_lines(idx, seat))
+
+        if self._settled:
+            lines.append("\n**Results:**")
+            for seat in self.seats:
+                if seat.net > 0:
+                    verb = f"won **{seat.net}**"
+                elif seat.net < 0:
+                    verb = f"lost **{abs(seat.net)}**"
+                else:
+                    verb = "broke even"
+                lines.append(f"• {seat.player.mention} {verb} bullet(s).")
+        elif self.table.phase == "insurance":
+            seat = self.current
+            lines.append(
+                f"\nDealer shows an **Ace**. {seat.player.mention}, take insurance for "
+                f"**{seat.game.insurance_cost()}** bullet(s)? (pays 2:1 on dealer blackjack)"
+            )
+        elif self.table.phase == "player":
+            seat = self.current
+            lines.append(f"\n▶ {seat.player.mention}, your move.")
+        return "\n".join(lines)
+
+    # --- button state ------------------------------------------------------
+    def _sync(self):
+        if self._settled or self.current is None:
+            for child in self.children:
+                child.disabled = True
+            return
+        game = self.current.game
+        insurance_phase = game.phase == "insurance"
+        player_phase = game.phase == "player"
+        actions = game.available_actions()
+        bal = db.get_bullets(self.guild_id, self.current.player.id)
+        hand = game.active_hand if player_phase else None
+
+        self.hit_button.disabled = not player_phase or "hit" not in actions
+        self.stand_button.disabled = not player_phase or "stand" not in actions
+        self.double_button.disabled = (
+            not player_phase or "double" not in actions or bal < (hand.bet if hand else 0)
+        )
+        self.split_button.disabled = (
+            not player_phase or "split" not in actions or bal < game.base_bet
+        )
+        self.insurance_button.disabled = not insurance_phase or bal < game.insurance_cost()
+        self.decline_button.disabled = not insurance_phase
+
+    async def _guard(self, interaction: discord.Interaction) -> bool:
+        if self._settled:
+            await interaction.response.send_message("This round has already ended.", ephemeral=True)
+            return False
+        seat = self.current
+        if seat is None or interaction.user.id != seat.player.id:
+            await interaction.response.send_message("It's not your turn.", ephemeral=True)
+            return False
+        return True
+
+    async def _act(self, interaction: discord.Interaction):
+        self._advance()
+        self._sync()
+        if not self._settled:
+            self._reset_turn_timer()
+        else:
+            self._cancel_turn_timer()
+        view = None if self._settled else self
+        await interaction.response.edit_message(content=self.render(), view=view)
+
+    # --- buttons -----------------------------------------------------------
+    @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary, row=0)
+    async def hit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._guard(interaction):
+            return
+        if "hit" not in self.current.game.available_actions():
+            await interaction.response.send_message("You can't hit right now.", ephemeral=True)
+            return
+        self.current.game.hit()
+        await self._act(interaction)
+
+    @discord.ui.button(label="Stand", style=discord.ButtonStyle.secondary, row=0)
+    async def stand_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._guard(interaction):
+            return
+        if "stand" not in self.current.game.available_actions():
+            await interaction.response.send_message("You can't stand right now.", ephemeral=True)
+            return
+        self.current.game.stand()
+        await self._act(interaction)
+
+    @discord.ui.button(label="Double", style=discord.ButtonStyle.success, row=0)
+    async def double_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._guard(interaction):
+            return
+        seat = self.current
+        if "double" not in seat.game.available_actions():
+            await interaction.response.send_message("You can't double this hand.", ephemeral=True)
+            return
+        if not self._commit(seat, seat.game.active_hand.bet):
+            await interaction.response.send_message("You don't have enough bullets to double.", ephemeral=True)
+            return
+        seat.game.double()
+        await self._act(interaction)
+
+    @discord.ui.button(label="Split", style=discord.ButtonStyle.success, row=0)
+    async def split_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._guard(interaction):
+            return
+        seat = self.current
+        if "split" not in seat.game.available_actions():
+            await interaction.response.send_message("You can't split this hand.", ephemeral=True)
+            return
+        if not self._commit(seat, seat.game.base_bet):
+            await interaction.response.send_message("You don't have enough bullets to split.", ephemeral=True)
+            return
+        seat.game.split()
+        await self._act(interaction)
+
+    @discord.ui.button(label="Insurance", style=discord.ButtonStyle.primary, row=1)
+    async def insurance_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._guard(interaction):
+            return
+        seat = self.current
+        if seat.game.phase != "insurance":
+            await interaction.response.send_message("Insurance isn't available.", ephemeral=True)
+            return
+        if not self._commit(seat, seat.game.insurance_cost()):
+            await interaction.response.send_message("You don't have enough bullets for insurance.", ephemeral=True)
+            return
+        seat.game.take_insurance()
+        await self._act(interaction)
+
+    @discord.ui.button(label="No Insurance", style=discord.ButtonStyle.danger, row=1)
+    async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._guard(interaction):
+            return
+        seat = self.current
+        if seat.game.phase != "insurance":
+            await interaction.response.send_message("Insurance isn't available.", ephemeral=True)
+            return
+        seat.game.decline_insurance()
+        await self._act(interaction)
+
+
 class BlackjackCog(commands.Cog):
     def __init__(self):
         self._active: set[tuple[int, int]] = set()
+        self._tables: dict[int, object] = {}  # channel_id -> open LobbyView/TableView
 
     @app_commands.command(name="blackjack", description="Play a hand of blackjack, wagering your bullets")
     @app_commands.describe(amount="Bullets to wager (minimum 5)")
@@ -311,6 +734,27 @@ class BlackjackCog(commands.Cog):
             content=view.render(), view=view if interactive else None
         )
         view.message = await interaction.original_response()
+
+    @app_commands.command(
+        name="blackjack-multiplayer",
+        description="Open a multiplayer blackjack table; players sit and wager during a 15s lobby",
+    )
+    @app_commands.guild_only()
+    async def blackjack_multiplayer(self, interaction: discord.Interaction):
+        channel_id = interaction.channel_id
+        if channel_id in self._tables:
+            await interaction.response.send_message(
+                "There's already a blackjack table open in this channel.", ephemeral=True
+            )
+            return
+        lobby = LobbyView(self, interaction.guild_id, channel_id, interaction.user)
+        self._tables[channel_id] = lobby
+        await interaction.response.send_message(content=lobby.render(), view=lobby)
+        lobby.message = await interaction.original_response()
+        log.info(
+            "multiplayer blackjack lobby opened in guild %d channel %d by %s (%d)",
+            interaction.guild_id, channel_id, interaction.user.name, interaction.user.id,
+        )
 
     @app_commands.command(
         name="blackjack-leaderboard",

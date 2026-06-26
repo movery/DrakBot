@@ -11,6 +11,7 @@ import unittest
 import db
 from blackjack_engine import (
     BlackjackGame,
+    BlackjackTable,
     Card,
     card_value,
     hand_total,
@@ -220,6 +221,121 @@ class SplitTests(unittest.TestCase):
                 self.fail("split did not stop at the hand cap")
         self.assertEqual(len(game.hands), 4)
         self.assertNotIn("split", game.available_actions())  # capped at four hands
+
+
+class BlackjackTableTests(unittest.TestCase):
+    """Multiplayer table: one shared dealer + shoe across several seats.
+
+    The table draws dealer up-card, dealer hole card, then each seat's two cards
+    in seat order, then any further draws (player hits, then the dealer) in order.
+    """
+
+    def test_deal_shares_dealer_and_gives_each_seat_its_own_cards(self):
+        table = BlackjackTable(_test_shoe=[c("9"), c("7"), c("K"), c("9"), c("8"), c("8")])
+        table.add_seat(10)
+        table.add_seat(10)
+        table.deal()
+        self.assertEqual(table.dealer, [c("9"), c("7")])
+        self.assertEqual(table.seats[0].hands[0].cards, [c("K"), c("9")])
+        self.assertEqual(table.seats[1].hands[0].cards, [c("8"), c("8")])
+        # Every seat shares the one dealer hand object.
+        self.assertIs(table.seats[0].dealer, table.dealer)
+        self.assertIs(table.seats[1].dealer, table.dealer)
+        self.assertEqual(table.phase, "player")
+        self.assertEqual(table.turn, 0)
+
+    def test_each_seat_settles_against_the_shared_dealer(self):
+        # Dealer 10/6 -> draws 2 -> 18. Seat0 19 wins, seat1 17 loses, seat2 18 pushes.
+        shoe = [c("10"), c("6"), c("K"), c("9"), c("10"), c("7"), c("K"), c("8"), c("2")]
+        table = BlackjackTable(_test_shoe=shoe)
+        for _ in range(3):
+            table.add_seat(10)
+        table.deal()
+        for _ in range(3):  # every seat stands on its dealt total
+            table.current_seat.stand()
+            table.advance_player()
+        self.assertEqual(table.phase, "done")
+        self.assertEqual(hand_total(table.dealer)[0], 18)
+        results = table.settle()
+        self.assertEqual(results[0].hands[0].outcome, "win")
+        self.assertEqual(results[0].total_return, 20)
+        self.assertEqual(results[1].hands[0].outcome, "loss")
+        self.assertEqual(results[1].total_return, 0)
+        self.assertEqual(results[2].hands[0].outcome, "push")
+        self.assertEqual(results[2].total_return, 10)
+
+    def test_dealer_blackjack_peek_ends_round_and_pays_insurance(self):
+        # Dealer A/K = blackjack. Seat0 insures a 19 (loses hand, insurance wins);
+        # seat1 has a natural (pushes against the dealer's blackjack).
+        shoe = [c("A"), c("K"), c("10"), c("9"), c("A"), c("K")]
+        table = BlackjackTable(_test_shoe=shoe)
+        table.add_seat(10)
+        table.add_seat(10)
+        table.deal()
+        self.assertEqual(table.phase, "insurance")
+        self.assertEqual(table.turn, 0)
+        table.current_seat.take_insurance()
+        table.advance_insurance()
+        self.assertEqual(table.turn, 1)
+        table.current_seat.decline_insurance()
+        table.advance_insurance()
+        self.assertEqual(table.phase, "done")  # peek found the dealer blackjack
+        results = table.settle()
+        self.assertEqual(results[0].hands[0].outcome, "loss")
+        self.assertEqual(results[0].insurance_outcome, "win")
+        self.assertEqual(results[0].insurance_return, 15)  # 5 stake + 10 at 2:1
+        self.assertEqual(results[0].total_return, 15)
+        self.assertEqual(results[1].hands[0].outcome, "push")
+        self.assertEqual(results[1].total_return, 10)
+
+    def test_insurance_round_visits_each_seat_before_the_peek(self):
+        # Dealer A/9 (soft 20, no natural): both seats decide insurance, then play.
+        shoe = [c("A"), c("9"), c("10"), c("8"), c("10"), c("9")]
+        table = BlackjackTable(_test_shoe=shoe)
+        table.add_seat(10)
+        table.add_seat(10)
+        table.deal()
+        self.assertEqual(table.phase, "insurance")
+        table.current_seat.decline_insurance()
+        table.advance_insurance()
+        self.assertEqual(table.phase, "insurance")  # still offering to seat 1
+        self.assertEqual(table.turn, 1)
+        table.current_seat.decline_insurance()
+        table.advance_insurance()
+        self.assertEqual(table.phase, "player")  # peek passed, play begins
+        self.assertEqual(table.turn, 0)
+
+    def test_split_seat_plays_two_hands_against_one_dealer_play(self):
+        # Seat splits 8s; dealer 9/7=16 busts on a K. Both split hands win.
+        shoe = [c("9"), c("7"), c("8"), c("8"), c("10"), c("9"), c("K")]
+        table = BlackjackTable(_test_shoe=shoe)
+        table.add_seat(10)
+        table.deal()
+        table.current_seat.split()
+        table.current_seat.stand()  # hand 0 (8,10 = 18)
+        table.current_seat.stand()  # hand 1 (8,9 = 17)
+        table.advance_player()
+        self.assertEqual(table.phase, "done")
+        self.assertEqual(len(table.dealer), 3)  # dealer drew exactly once
+        self.assertTrue(hand_total(table.dealer)[0] > 21)
+        results = table.settle()
+        self.assertEqual(len(results[0].hands), 2)
+        self.assertTrue(all(h.outcome == "win" for h in results[0].hands))
+        self.assertEqual(results[0].total_return, 40)
+
+    def test_dealer_does_not_draw_when_every_live_hand_is_natural(self):
+        # Dealer 9/7=16 would normally draw, but both seats have naturals.
+        shoe = [c("9"), c("7"), c("A"), c("K"), c("A"), c("Q")]
+        table = BlackjackTable(_test_shoe=shoe)
+        table.add_seat(10)
+        table.add_seat(10)
+        table.deal()
+        self.assertEqual(table.phase, "done")  # nobody to play, dealer no BJ
+        self.assertEqual(table.dealer, [c("9"), c("7")])  # dealer stood pat
+        results = table.settle()
+        for r in results:
+            self.assertEqual(r.hands[0].outcome, "blackjack")
+            self.assertEqual(r.total_return, 25)
 
 
 class BlackjackDbTests(unittest.TestCase):

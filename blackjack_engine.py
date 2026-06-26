@@ -109,13 +109,22 @@ class BlackjackGame:
     """
 
     def __init__(self, base_bet: int, rng: random.Random | None = None,
+                 shoe: list[Card] | None = None, dealer: list[Card] | None = None,
                  _test_shoe: list[Card] | None = None):
         self.base_bet = base_bet
         self.rng = rng or random.Random()
-        # _test_shoe lets tests fix the draw order; cards are drawn from the front.
-        self.shoe = _test_shoe if _test_shoe is not None else build_shoe(NUM_DECKS, self.rng)
+        # Cards are drawn from the front of the shoe. `_test_shoe` lets tests fix
+        # the draw order; `shoe`/`dealer` let a BlackjackTable share one shoe and
+        # one dealer hand across every seat (the game is then a single seat).
+        if _test_shoe is not None:
+            self.shoe = _test_shoe
+        elif shoe is not None:
+            self.shoe = shoe
+        else:
+            self.shoe = build_shoe(NUM_DECKS, self.rng)
+        self.shared = dealer is not None  # seat of a shared-dealer table
         self.hands: list[Hand] = []
-        self.dealer: list[Card] = []
+        self.dealer: list[Card] = dealer if dealer is not None else []
         self.active = 0
         self.insurance_bet = 0
         self.phase = "init"
@@ -148,6 +157,27 @@ class BlackjackGame:
             self.active = 0
             self._normalize()
 
+    # --- shared-dealer table seat ------------------------------------------
+    # When this game is a seat of a BlackjackTable the table owns the dealer:
+    # it deals the dealer's cards, runs one insurance round + peek for everyone,
+    # and plays the dealer once. The seat only deals/plays its own hand.
+    def deal_seat(self) -> None:
+        """Deal this seat's two player cards (the table already dealt the dealer)."""
+        assert self.shared
+        player = [self._draw(), self._draw()]
+        hand = Hand(cards=player, bet=self.base_bet)
+        hand.is_natural_blackjack = is_blackjack(player)
+        self.hands = [hand]
+        # Insurance is offered when the dealer shows an Ace; the table coordinates
+        # the peek, so a seat just parks in 'insurance'/'dealt' until told to play.
+        self.phase = "insurance" if self.dealer[0].rank == "A" else "dealt"
+
+    def start_turn(self) -> None:
+        """Begin this seat's player turn (table has peeked, no dealer blackjack)."""
+        self.phase = "player"
+        self.active = 0
+        self._normalize()
+
     # --- insurance ---------------------------------------------------------
     @property
     def dealer_upcard(self) -> Card:
@@ -160,11 +190,19 @@ class BlackjackGame:
     def take_insurance(self) -> None:
         assert self.phase == "insurance"
         self.insurance_bet = self.insurance_cost()
-        self._finish_dealing()
+        # In a shared table the table peeks once for everyone after the insurance
+        # round, so a seat just waits in 'dealt'.
+        if self.shared:
+            self.phase = "dealt"
+        else:
+            self._finish_dealing()
 
     def decline_insurance(self) -> None:
         assert self.phase == "insurance"
-        self._finish_dealing()
+        if self.shared:
+            self.phase = "dealt"
+        else:
+            self._finish_dealing()
 
     # --- player turn -------------------------------------------------------
     def _normalize(self) -> None:
@@ -302,3 +340,123 @@ class BlackjackGame:
             total_return += ins_return
 
         return Settlement(results, total_return, ins_outcome, ins_return)
+
+
+class BlackjackTable:
+    """A single round of blackjack for several players sharing one dealer and shoe.
+
+    Each seat is a `BlackjackGame` that shares this table's shoe and dealer hand.
+    The table drives the shared parts the seats can't decide alone: it deals the
+    dealer, runs one insurance round and a single peek for naturals, walks the
+    seats through their turns one at a time, plays the dealer once, and then each
+    seat settles against the shared dealer. Bullet accounting lives in the caller.
+
+    Phases: 'init' -> ('insurance' ->) 'player' -> 'dealer' -> 'done'. `turn` is the
+    index of the current actor in `seats` during the insurance and player phases.
+    """
+
+    def __init__(self, rng: random.Random | None = None,
+                 _test_shoe: list[Card] | None = None):
+        self.rng = rng or random.Random()
+        self.shoe = _test_shoe if _test_shoe is not None else build_shoe(NUM_DECKS, self.rng)
+        self.dealer: list[Card] = []
+        self.seats: list[BlackjackGame] = []
+        self.phase = "init"
+        self.turn = 0
+
+    def _draw(self) -> Card:
+        if not self.shoe:  # CSM safety net: never run dry mid-round
+            self.shoe = build_shoe(NUM_DECKS, self.rng)
+        return self.shoe.pop(0)
+
+    def add_seat(self, base_bet: int) -> BlackjackGame:
+        """Add a player seat sharing this table's shoe and dealer hand."""
+        assert self.phase == "init"
+        seat = BlackjackGame(base_bet, rng=self.rng, shoe=self.shoe, dealer=self.dealer)
+        self.seats.append(seat)
+        return seat
+
+    @property
+    def current_seat(self) -> BlackjackGame:
+        return self.seats[self.turn]
+
+    # --- dealing -----------------------------------------------------------
+    def deal(self) -> None:
+        assert self.seats, "a table needs at least one seat"
+        self.dealer.append(self._draw())  # up-card
+        self.dealer.append(self._draw())  # hole card
+        for seat in self.seats:
+            seat.deal_seat()
+        if self.dealer[0].rank == "A":
+            self.phase = "insurance"  # offer insurance seat by seat before peeking
+            self.turn = 0
+        else:
+            self._peek_or_play()
+
+    # --- insurance ---------------------------------------------------------
+    def advance_insurance(self) -> None:
+        """Move to the next seat's insurance decision, then peek once all decided."""
+        assert self.phase == "insurance"
+        self.turn += 1
+        if self.turn >= len(self.seats):
+            self._peek_or_play()
+
+    def _peek_or_play(self) -> None:
+        """Dealer peeks for blackjack; otherwise non-natural seats begin play."""
+        if is_blackjack(self.dealer):
+            for seat in self.seats:
+                seat.phase = "done"  # round over; seats settle vs the dealer's BJ
+            self.phase = "done"
+            return
+        for seat in self.seats:
+            if seat.hands[0].is_natural_blackjack:
+                seat.phase = "done"  # winner already; skip its turn
+            else:
+                seat.start_turn()
+        nxt = self._next_playable(-1)
+        if nxt is None:
+            self._play_dealer()
+        else:
+            self.phase = "player"
+            self.turn = nxt
+
+    # --- player turns ------------------------------------------------------
+    def advance_player(self) -> None:
+        """Move past the current seat once it has finished all of its hands."""
+        assert self.phase == "player"
+        if self.current_seat.phase == "player":
+            return  # still acting
+        nxt = self._next_playable(self.turn)
+        if nxt is None:
+            self._play_dealer()
+        else:
+            self.turn = nxt
+
+    def _next_playable(self, after: int) -> int | None:
+        for i in range(after + 1, len(self.seats)):
+            if self.seats[i].phase == "player":
+                return i
+        return None
+
+    # --- dealer turn -------------------------------------------------------
+    def _play_dealer(self) -> None:
+        self.phase = "dealer"
+        # The dealer only draws if some hand can still beat it. A bust loses and a
+        # natural already won (the peek ruled out a dealer natural), so neither
+        # needs the dealer to play — matching the solo engine.
+        live = any(
+            not h.is_bust and not h.is_natural_blackjack
+            for seat in self.seats for h in seat.hands
+        )
+        if live:
+            while hand_total(self.dealer)[0] < DEALER_STANDS_ON:
+                self.dealer.append(self._draw())
+        for seat in self.seats:
+            seat.phase = "done"
+        self.phase = "done"
+
+    # --- settlement --------------------------------------------------------
+    def settle(self) -> list[Settlement]:
+        """Settle every seat against the shared dealer (caller credits bullets)."""
+        assert self.phase == "done"
+        return [seat.settle() for seat in self.seats]

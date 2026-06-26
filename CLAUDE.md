@@ -100,7 +100,7 @@ When changing `db.py` or deathroll state logic, run the suite first to capture a
 | `cogs/daily.py` | `/daily` — once-per-calendar-day bullet grant (resets midnight EST) |
 | `cogs/flee.py` | `/flee` — moves other users out of a designated user's voice channel |
 | `cogs/deathroll.py` | `/deathroll` — bullet gambling game with Discord UI buttons |
-| `cogs/blackjack.py` | `/blackjack`, `/blackjack-leaderboard` — solo blackjack vs the dealer for bullets |
+| `cogs/blackjack.py` | `/blackjack`, `/blackjack-multiplayer`, `/blackjack-leaderboard` — solo and multiplayer blackjack vs the dealer for bullets |
 | `cogs/stream_guard.py` | Disconnects users who stream within 5s of joining voice |
 
 ### Blackjack (`cogs/blackjack.py` + `blackjack_engine.py`)
@@ -115,3 +115,18 @@ dealer Ace, and **no surrender**. Minimum buy-in is 5 bullets.
 Bullets are escrowed like deathroll: the base bet is deducted up front and each
 double/split/insurance deducts more, with the running total stored in `blackjack_games.escrow`
 so an interrupted round is fully refunded by `db.recover_blackjack_games()` on startup.
+
+**Multiplayer** (`/blackjack-multiplayer`) reuses the same engine and DB. The pure
+`BlackjackTable` (in `blackjack_engine.py`) owns one shoe and one dealer hand shared by
+several `BlackjackGame` *seats* — each seat is an ordinary single-player game constructed
+with `shoe=`/`dealer=` pointing at the table's lists. The table lifts the parts a seat
+can't decide alone: it deals the dealer, runs one insurance round and a single peek, walks
+seats through their turns sequentially (`advance_insurance`/`advance_player`, `current_seat`),
+plays the dealer once, and exposes `settle()` (one `Settlement` per seat). `BlackjackGame`
+gained `deal_seat()`, `start_turn()`, and a `shared` flag (in shared mode insurance does not
+peek — the table does). On the Discord side, `LobbyView` runs the 15s lobby (a `WagerModal`
+collects each per-player wager and creates the `active` row at sit time so a lobby-time crash
+is recoverable), then hands off to `TableView`. `TableView` has `timeout=None` and drives an
+asyncio **turn clock** (a generation counter guards against a timer/click race) instead of the
+View timeout, so one idle player is auto-stood without ending the whole table. No DB schema
+change — each seat is a normal `blackjack_games` row, so the leaderboard aggregates both modes.

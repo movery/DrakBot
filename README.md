@@ -48,7 +48,8 @@ Solo blackjack against the dealer, played through Discord buttons and wagered in
 
 | Command | Description |
 |---|---|
-| `/blackjack amount` | Deal a hand and bet the given number of bullets |
+| `/blackjack amount` | Deal a solo hand and bet the given number of bullets |
+| `/blackjack-multiplayer` | Open a shared table; players sit and wager during a 15-second lobby |
 | `/blackjack-leaderboard` | Show the top players ranked by net bullets won/lost (with W-L-P records) |
 
 House rules (fixed):
@@ -62,6 +63,8 @@ House rules (fixed):
 - **No surrender**
 
 Bullets are escrowed when the hand is dealt — the base bet up front, with each double/split/insurance deducting more — so an interrupted round is fully refunded on the next startup. Each player has **120 seconds** to act before the round auto-resolves. Win/loss/push records are tracked per hand, so a split round can score multiple results at once.
+
+**Multiplayer** (`/blackjack-multiplayer`) seats up to **6 players** against one shared dealer. Opening the table starts a **15-second lobby**: anyone presses **Sit at table** and types their own wager (any multiple of 5). When the lobby closes the table deals, and players take their turns **one at a time** on the shared message — only the current player's buttons are live, and an idle player is auto-stood after **30 seconds** so the table keeps moving. The same full house rules apply per player, each seat settles against the same dealer hand, and results feed the same leaderboard.
 
 ### Stream Guard
 When enabled, any user who starts streaming video (camera or Go Live) within 5 seconds of joining a voice channel is automatically disconnected. Controlled via the `STREAM_GUARD_ENABLED` env var.
